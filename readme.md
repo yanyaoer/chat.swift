@@ -1,13 +1,17 @@
-# Minimal UI for llm chat without dependency
+# Minimal UI for llm chat without dependency and apple developer account
 
 ![](./assets/screenshot.png)
 
 ## Dev:
+```bash
 $ chmod +x main.swift
 $ ./main.swift
+```
 
 ## Build:
+```bash
 $ swiftc main.swift -o chat_swift
+```
 
 ## Config:
 Use your own config file located at `.config/chat.swift/config.json`
@@ -33,12 +37,17 @@ Use your own config file located at `.config/chat.swift/config.json`
         "gemini": {
             "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
             "apiKey": "",
-            "models": ["gemini-2.5-flash-preview-04-17", "gemini-2.5-pro-03-25"]
+            "models": ["gemini-2.5-flash-preview-04-17", "gemini-2.5-pro-03-25"],
+            "proxyEnabled": true,
+            "proxyHost": "127.0.0.1",
+            "proxyPort": 1088
+
         }
     },
     "defaultModel": "deepseek-v3-250324"
 } 
 ```
+* support socks5 proxy only
 
 ## shortcuts
 
@@ -53,4 +62,4 @@ ctrl + alt + shift + cmd - k	:	chat_swift
 - always on top of desktop
 - autoclose with last window
 - support multiple models and remember the last model
-- proxy for gemini
+- socks5proxy for gemini

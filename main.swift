@@ -220,11 +220,13 @@ struct App: SwiftUI.App {
     request.httpBody = try? encoder.encode(chatRequest)
     
     let sessionConfig = URLSessionConfiguration.default
-    if modelname.lowercased().contains("gemini") {
+    if let proxyEnabled = modelConfig.proxyEnabled, proxyEnabled,
+       let proxyHost = modelConfig.proxyHost,
+       let proxyPort = modelConfig.proxyPort {
         sessionConfig.connectionProxyDictionary = [
             kCFNetworkProxiesSOCKSEnable: true,
-            kCFNetworkProxiesSOCKSProxy: "127.0.0.1",
-            kCFNetworkProxiesSOCKSPort: 1088,
+            kCFNetworkProxiesSOCKSProxy: proxyHost,
+            kCFNetworkProxiesSOCKSPort: proxyPort,
             kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5
         ]
     }
@@ -272,6 +274,9 @@ struct ModelConfig: Codable {
     let baseURL: String
     let apiKey: String
     let models: [String]
+    let proxyEnabled: Bool?
+    let proxyHost: String?
+    let proxyPort: Int?
 }
 
 struct OpenAIConfig: Codable {
@@ -294,7 +299,10 @@ struct OpenAIConfig: Codable {
                     "openai": ModelConfig(
                         baseURL: "https://ark.cn-beijing.volces.com/api/v3",
                         apiKey: "please input your api key",
-                        models: ["qwen2.5", "deepseek-v3-250324"]
+                        models: ["qwen2.5", "deepseek-v3-250324"],
+                        proxyEnabled: false,
+                        proxyHost: "127.0.0.1",
+                        proxyPort: 1088
                     )
                 ],
                 defaultModel: "deepseek-v3-250324"
