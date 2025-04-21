@@ -11,9 +11,10 @@ jobs:
       - name: Build executable for release
         run: swiftc main.swift -o chat_swift 
       - name: Compress archive
-        run: tar -czf ${{ github.ref_name }}.tar.gz chat_swift
+        run: tar -czf chat_swift.tar.gz chat_swift
       - name: Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
         with:
-          files: ${{ github.ref_name }}.tar.gz
+          files: chat_swift.tar.gz
+          token: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
