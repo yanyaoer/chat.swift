@@ -1,0 +1,315 @@
+#!/usr/bin/env xcrun -sdk macosx swift
+
+import Foundation
+import SwiftUI
+import AppKit
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return true
+    }
+}
+
+
+struct VisualEffect: NSViewRepresentable {
+  func makeNSView(context: Context) -> NSVisualEffectView {
+    let view = NSVisualEffectView()
+    view.blendingMode = .behindWindow
+    view.state = .active
+    view.material = .underWindowBackground
+    return view
+  }
+  func updateNSView(_ nsView: NSVisualEffectView, context: Context) { }
+}
+
+
+struct ChatMessage: Codable {
+    let role: String
+    let content: String
+    let timestamp: Date
+    let model: String?
+    
+    init(role: String, content: String, model: String? = nil) {
+        self.role = role
+        self.content = content
+        self.timestamp = Date()
+        self.model = model
+    }
+}
+
+struct ChatRequest: Codable {
+    let model: String
+    let messages: [ChatMessage]
+    let stream: Bool
+}
+
+class ChatHistory {
+    static let shared = ChatHistory()
+    private let historyPath: URL
+    
+    private init() {
+        let configPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config")
+            .appendingPathComponent("chat.swift")
+        
+        try? FileManager.default.createDirectory(at: configPath, withIntermediateDirectories: true)
+        
+        historyPath = configPath.appendingPathComponent("history.md")
+    }
+    
+    func saveMessage(_ message: ChatMessage) {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let timestamp = dateFormatter.string(from: message.timestamp)
+        
+        let modelInfo = message.model.map { " [\($0)]" } ?? ""
+        let text = """
+        
+[\(timestamp)] \(message.role)\(modelInfo):
+\(message.content)
+"""
+        
+        if let data = text.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: historyPath.path) {
+                if let handle = try? FileHandle(forWritingTo: historyPath) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                }
+            } else {
+                try? data.write(to: historyPath)
+            }
+        }
+    }
+}
+
+class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject {
+    @Published var output: String = ""
+    private var currentResponse: String = ""
+    private var currentModel: String = ""
+    
+    override init() {
+        super.init()
+    }
+    
+    func setModel(_ model: String) {
+        currentModel = model
+    }
+    
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if let text = String(data: data, encoding: .utf8) {
+            let lines = text.components(separatedBy: "\n")
+            for line in lines {
+                if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
+                    do {
+                        if line.hasPrefix("data: [DONE]") {
+                            let assistantMessage = ChatMessage(role: "assistant", content: currentResponse, model: currentModel)
+                            ChatHistory.shared.saveMessage(assistantMessage)
+                            currentResponse = ""
+                            print("DONE")
+                            return
+                        }
+                        // print(line)
+                        if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                           let choices = json["choices"] as? [[String: Any]],
+                           let firstChoice = choices.first,
+                           let delta = firstChoice["delta"] as? [String: Any],
+                           let content = delta["content"] as? String {
+                            DispatchQueue.main.async {
+                                self.output += content
+                                self.currentResponse += content
+                            }
+                        }
+                    } catch {
+                        print("Error parsing JSON: \(error)")
+                    }
+                }
+            }
+        }
+    }
+    
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            DispatchQueue.main.async {
+                self.output += "\nError: \(error.localizedDescription)"
+            }
+        }
+    }
+}
+
+struct App: SwiftUI.App {
+  @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
+  @State private var input = ""
+  @StateObject private var streamDelegate = StreamDelegate()
+  @AppStorage("modelname") public var modelname = OpenAIConfig.load().defaultModel
+  @FocusState private var focused: Bool
+
+  var body: some Scene {
+    WindowGroup {
+      VStack(alignment: .leading) {
+        PopoverView(modelname: $modelname)
+
+        LLMInputView
+        Divider()
+
+        if streamDelegate.output.count > 0 {
+          LLMOutputView
+        } else {
+          Spacer(minLength: 20)
+        }
+      }
+      .background(VisualEffect().ignoresSafeArea())
+      .frame(minWidth: 300, minHeight: 150, alignment: .topLeading)
+      .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification), perform: { _ in 
+        exit(0)
+      })
+      .onAppear {
+        focused = true
+      }
+    }
+    .windowStyle(HiddenTitleBarWindowStyle())
+    .defaultSize(width: 0.5, height: 1.0)
+  }
+
+  private var LLMInputView: some View {
+    TextField("write something..", text: $input).onSubmit {
+      streamDelegate.output = ""
+      sendMessage(message: self.input)
+    }
+    .textFieldStyle(.plain)
+    .focused($focused)
+    .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+  }
+
+  private var LLMOutputView: some View {
+    ScrollView {
+      Text(streamDelegate.output)
+        .lineLimit(nil)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 10)
+        .lineSpacing(5)
+    }
+    .defaultScrollAnchor(.bottom)
+  }
+
+  private func sendMessage(message: String) {
+    let config = OpenAIConfig.load()
+    guard let modelConfig = config.getConfig(for: modelname) else {
+        print("Error: Model configuration not found")
+        return
+    }
+    
+    let url = URL(string: "\(modelConfig.baseURL)/chat/completions")!
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("Bearer \(modelConfig.apiKey)", forHTTPHeaderField: "Authorization")
+    
+    let userMessage = ChatMessage(role: "user", content: message, model: modelname)
+    ChatHistory.shared.saveMessage(userMessage)
+    
+    let chatRequest = ChatRequest(
+        model: modelname,
+        messages: [ChatMessage(role: "user", content: message)],
+        stream: true
+    )
+    
+    let encoder = JSONEncoder()
+    request.httpBody = try? encoder.encode(chatRequest)
+    
+    let sessionConfig = URLSessionConfiguration.default
+    if modelname.lowercased().contains("gemini") {
+        sessionConfig.connectionProxyDictionary = [
+            kCFNetworkProxiesSOCKSEnable: true,
+            kCFNetworkProxiesSOCKSProxy: "127.0.0.1",
+            kCFNetworkProxiesSOCKSPort: 1088,
+            kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5
+        ]
+    }
+    
+    let session = URLSession(configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
+    streamDelegate.setModel(modelname)
+    let task = session.dataTask(with: request)
+    task.resume()
+  }
+}
+
+
+struct PopoverView: View {
+  @State private var ModelData = OpenAIConfig.load().models.values.flatMap { $0.models }
+  @Binding public var modelname: String
+
+  var body: some View {
+    ZStack {
+      Picker("", selection: $modelname) {
+        ForEach(ModelData, id: \.self) { name in
+          Text(name)
+        }
+      }
+      .frame(width: 100, height:10, alignment: .trailing)
+    }
+    .offset(x:0, y:5)
+    .ignoresSafeArea()
+    .frame(maxWidth: .infinity, maxHeight: 0, alignment: .trailing)
+  }
+}
+
+    
+
+DispatchQueue.main.async {
+  // hide dock icon
+  NSApplication.shared.setActivationPolicy(.accessory)
+  // always on top
+  NSApplication.shared.activate(ignoringOtherApps: true)
+  if let window = NSApplication.shared.windows.first {
+    window.level = .floating
+  }
+}
+
+struct ModelConfig: Codable {
+    let baseURL: String
+    let apiKey: String
+    let models: [String]
+}
+
+struct OpenAIConfig: Codable {
+    let models: [String: ModelConfig]
+    let defaultModel: String
+    
+    static func load() -> OpenAIConfig {
+        let configPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config")
+            .appendingPathComponent("chat.swift")
+            .appendingPathComponent("config.json")
+        
+        do {
+            let data = try Data(contentsOf: configPath)
+            return try JSONDecoder().decode(OpenAIConfig.self, from: data)
+        } catch {
+            print("Error loading config: \(error)")
+            return OpenAIConfig(
+                models: [
+                    "openai": ModelConfig(
+                        baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+                        apiKey: "please input your api key",
+                        models: ["qwen2.5", "deepseek-v3-250324"]
+                    )
+                ],
+                defaultModel: "deepseek-v3-250324"
+            )
+        }
+    }
+    
+    func getConfig(for model: String) -> ModelConfig? {
+        for (_, config) in models {
+            if config.models.contains(model) {
+                return config
+            }
+        }
+        return nil
+    }
+}
+
+App.main()
