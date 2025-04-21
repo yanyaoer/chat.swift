@@ -3,8 +3,8 @@
 ![](./assets/screenshot.png)
 
 ## Dev:
-$ chmod +x your_script_file
-$ ./your_script_file
+$ chmod +x main.swift
+$ ./main.swift
 
 ## Build:
 $ swiftc main.swift -o chat_swift
@@ -40,8 +40,13 @@ Use your own config file located at `.config/chat.swift/config.json`
 } 
 ```
 
-# shortcuts example with skhd or add Keyboard Shortcuts by System Settings
-# ctrl + alt + shift + cmd - k	:	chat_swift
+## shortcuts
+
+example with [skhd](https://github.com/koekeishiya/skhd) or add Keyboard Shortcuts by System Settings
+
+```
+ctrl + alt + shift + cmd - k	:	chat_swift
+```
 
 ## Feature:
 - minimal chat UI
