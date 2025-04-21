@@ -1,0 +1,19 @@
+name: Release
+
+on: push
+
+jobs:
+  release:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build executable for release
+        run: swiftc main.swift -o chat_swift 
+      - name: Compress archive
+        run: tar -czf ${{ github.ref_name }}.tar.gz chat_swift
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          files: ${{ github.ref_name }}.tar.gz
