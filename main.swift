@@ -5,9 +5,9 @@ import SwiftUI
 import AppKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
-    }
+  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+    return true
+  }
 }
 
 
@@ -24,117 +24,117 @@ struct VisualEffect: NSViewRepresentable {
 
 
 struct ChatMessage: Codable {
-    let role: String
-    let content: String
-    let timestamp: Date
-    let model: String?
-    
-    init(role: String, content: String, model: String? = nil) {
-        self.role = role
-        self.content = content
-        self.timestamp = Date()
-        self.model = model
-    }
+  let role: String
+  let content: String
+  let timestamp: Date
+  let model: String?
+
+  init(role: String, content: String, model: String? = nil) {
+    self.role = role
+    self.content = content
+    self.timestamp = Date()
+    self.model = model
+  }
 }
 
 struct ChatRequest: Codable {
-    let model: String
-    let messages: [ChatMessage]
-    let stream: Bool
+  let model: String
+  let messages: [ChatMessage]
+  let stream: Bool
 }
 
 class ChatHistory {
-    static let shared = ChatHistory()
-    private let historyPath: URL
+  static let shared = ChatHistory()
+  private let historyPath: URL
+  
+  private init() {
+    let configPath = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".config")
+      .appendingPathComponent("chat.swift")
     
-    private init() {
-        let configPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config")
-            .appendingPathComponent("chat.swift")
-        
-        try? FileManager.default.createDirectory(at: configPath, withIntermediateDirectories: true)
-        
-        historyPath = configPath.appendingPathComponent("history.md")
-    }
+    try? FileManager.default.createDirectory(at: configPath, withIntermediateDirectories: true)
     
-    func saveMessage(_ message: ChatMessage) {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        let timestamp = dateFormatter.string(from: message.timestamp)
-        
-        let modelInfo = message.model.map { " [\($0)]" } ?? ""
-        let text = """
-        
+    historyPath = configPath.appendingPathComponent("history.md")
+  }
+  
+  func saveMessage(_ message: ChatMessage) {
+    let dateFormatter = DateFormatter()
+    dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    let timestamp = dateFormatter.string(from: message.timestamp)
+    
+    let modelInfo = message.model.map { " [\($0)]" } ?? ""
+    let text = """
+    
 [\(timestamp)] \(message.role)\(modelInfo):
 \(message.content)
 """
-        
-        if let data = text.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: historyPath.path) {
-                if let handle = try? FileHandle(forWritingTo: historyPath) {
-                    handle.seekToEndOfFile()
-                    handle.write(data)
-                    handle.closeFile()
-                }
-            } else {
-                try? data.write(to: historyPath)
-            }
+    
+    if let data = text.data(using: .utf8) {
+      if FileManager.default.fileExists(atPath: historyPath.path) {
+        if let handle = try? FileHandle(forWritingTo: historyPath) {
+          handle.seekToEndOfFile()
+          handle.write(data)
+          handle.closeFile()
         }
+      } else {
+        try? data.write(to: historyPath)
+      }
     }
+  }
 }
 
 class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject {
-    @Published var output: String = ""
-    private var currentResponse: String = ""
-    private var currentModel: String = ""
-    
-    override init() {
-        super.init()
-    }
-    
-    func setModel(_ model: String) {
-        currentModel = model
-    }
-    
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        if let text = String(data: data, encoding: .utf8) {
-            let lines = text.components(separatedBy: "\n")
-            for line in lines {
-                if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
-                    do {
-                        if line.hasPrefix("data: [DONE]") {
-                            let assistantMessage = ChatMessage(role: "assistant", content: currentResponse, model: currentModel)
-                            ChatHistory.shared.saveMessage(assistantMessage)
-                            currentResponse = ""
-                            print("DONE")
-                            return
-                        }
-                        // print(line)
-                        if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                           let choices = json["choices"] as? [[String: Any]],
-                           let firstChoice = choices.first,
-                           let delta = firstChoice["delta"] as? [String: Any],
-                           let content = delta["content"] as? String {
-                            DispatchQueue.main.async {
-                                self.output += content
-                                self.currentResponse += content
-                            }
-                        }
-                    } catch {
-                        print("Error parsing JSON: \(error)")
-                    }
-                }
+  @Published var output: String = ""
+  private var currentResponse: String = ""
+  private var currentModel: String = ""
+  
+  override init() {
+    super.init()
+  }
+  
+  func setModel(_ model: String) {
+    currentModel = model
+  }
+  
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    if let text = String(data: data, encoding: .utf8) {
+      let lines = text.components(separatedBy: "\n")
+      for line in lines {
+        if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
+          do {
+            if line.hasPrefix("data: [DONE]") {
+              let assistantMessage = ChatMessage(role: "assistant", content: currentResponse, model: currentModel)
+              ChatHistory.shared.saveMessage(assistantMessage)
+              currentResponse = ""
+              print("DONE")
+              return
             }
-        }
-    }
-    
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            DispatchQueue.main.async {
-                self.output += "\nError: \(error.localizedDescription)"
+            // print(line)
+            if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+               let choices = json["choices"] as? [[String: Any]],
+               let firstChoice = choices.first,
+               let delta = firstChoice["delta"] as? [String: Any],
+               let content = delta["content"] as? String {
+              DispatchQueue.main.async {
+                self.output += content
+                self.currentResponse += content
+              }
             }
+          } catch {
+            print("Error parsing JSON: \(error)")
+          }
         }
+      }
     }
+  }
+  
+  func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    if let error = error {
+      DispatchQueue.main.async {
+        self.output += "\nError: \(error.localizedDescription)"
+      }
+    }
+  }
 }
 
 struct App: SwiftUI.App {
@@ -197,8 +197,8 @@ struct App: SwiftUI.App {
   private func sendMessage(message: String) {
     let config = OpenAIConfig.load()
     guard let modelConfig = config.getConfig(for: modelname) else {
-        print("Error: Model configuration not found")
-        return
+      print("Error: Model configuration not found")
+      return
     }
     
     let url = URL(string: "\(modelConfig.baseURL)/chat/completions")!
@@ -211,9 +211,9 @@ struct App: SwiftUI.App {
     ChatHistory.shared.saveMessage(userMessage)
     
     let chatRequest = ChatRequest(
-        model: modelname,
-        messages: [ChatMessage(role: "user", content: message)],
-        stream: true
+      model: modelname,
+      messages: [ChatMessage(role: "user", content: message)],
+      stream: true
     )
     
     let encoder = JSONEncoder()
@@ -221,14 +221,14 @@ struct App: SwiftUI.App {
     
     let sessionConfig = URLSessionConfiguration.default
     if let proxyEnabled = modelConfig.proxyEnabled, proxyEnabled,
-       let proxyHost = modelConfig.proxyHost,
-       let proxyPort = modelConfig.proxyPort {
-        sessionConfig.connectionProxyDictionary = [
-            kCFNetworkProxiesSOCKSEnable: true,
-            kCFNetworkProxiesSOCKSProxy: proxyHost,
-            kCFNetworkProxiesSOCKSPort: proxyPort,
-            kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5
-        ]
+      let proxyHost = modelConfig.proxyHost,
+      let proxyPort = modelConfig.proxyPort {
+       sessionConfig.connectionProxyDictionary = [
+         kCFNetworkProxiesSOCKSEnable: true,
+         kCFNetworkProxiesSOCKSProxy: proxyHost,
+         kCFNetworkProxiesSOCKSPort: proxyPort,
+         kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5
+       ]
     }
     
     let session = URLSession(configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
@@ -271,53 +271,53 @@ DispatchQueue.main.async {
 }
 
 struct ModelConfig: Codable {
-    let baseURL: String
-    let apiKey: String
-    let models: [String]
-    let proxyEnabled: Bool?
-    let proxyHost: String?
-    let proxyPort: Int?
+  let baseURL: String
+  let apiKey: String
+  let models: [String]
+  let proxyEnabled: Bool?
+  let proxyHost: String?
+  let proxyPort: Int?
 }
 
 struct OpenAIConfig: Codable {
-    let models: [String: ModelConfig]
-    let defaultModel: String
+  let models: [String: ModelConfig]
+  let defaultModel: String
+  
+  static func load() -> OpenAIConfig {
+    let configPath = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".config")
+      .appendingPathComponent("chat.swift")
+      .appendingPathComponent("config.json")
     
-    static func load() -> OpenAIConfig {
-        let configPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config")
-            .appendingPathComponent("chat.swift")
-            .appendingPathComponent("config.json")
-        
-        do {
-            let data = try Data(contentsOf: configPath)
-            return try JSONDecoder().decode(OpenAIConfig.self, from: data)
-        } catch {
-            print("Error loading config: \(error)")
-            return OpenAIConfig(
-                models: [
-                    "openai": ModelConfig(
-                        baseURL: "https://ark.cn-beijing.volces.com/api/v3",
-                        apiKey: "please input your api key",
-                        models: ["qwen2.5", "deepseek-v3-250324"],
-                        proxyEnabled: false,
-                        proxyHost: "127.0.0.1",
-                        proxyPort: 1088
-                    )
-                ],
-                defaultModel: "deepseek-v3-250324"
-            )
-        }
+    do {
+      let data = try Data(contentsOf: configPath)
+      return try JSONDecoder().decode(OpenAIConfig.self, from: data)
+    } catch {
+      print("Error loading config: \(error)")
+      return OpenAIConfig(
+        models: [
+          "openai": ModelConfig(
+            baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+            apiKey: "please input your api key",
+            models: ["qwen2.5", "deepseek-v3-250324"],
+            proxyEnabled: false,
+            proxyHost: "127.0.0.1",
+            proxyPort: 1088
+          )
+        ],
+        defaultModel: "deepseek-v3-250324"
+      )
     }
-    
-    func getConfig(for model: String) -> ModelConfig? {
-        for (_, config) in models {
-            if config.models.contains(model) {
-                return config
-            }
-        }
-        return nil
+  }
+  
+  func getConfig(for model: String) -> ModelConfig? {
+    for (_, config) in models {
+      if config.models.contains(model) {
+        return config
+      }
     }
+    return nil
+  }
 }
 
 App.main()
