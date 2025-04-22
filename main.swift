@@ -182,6 +182,9 @@ struct App: SwiftUI.App {
           PopoverView(modelname: $modelname)
           PromptMenuView(selectedPrompt: $selectedPrompt)
         }
+        .offset(x: 0, y: 5)
+        .ignoresSafeArea()
+        .frame(maxWidth: .infinity, maxHeight: 0, alignment: .trailing)
 
         LLMInputView
         Divider()
@@ -299,9 +302,6 @@ struct PopoverView: View {
       }
       .frame(width: 100, height: 10, alignment: .trailing)
     }
-    .offset(x: 0, y: 5)
-    .ignoresSafeArea()
-    .frame(maxWidth: .infinity, maxHeight: 0, alignment: .trailing)
   }
 }
 
@@ -310,14 +310,15 @@ struct PromptMenuView: View {
   private let prompts = ChatHistory.shared.getAvailablePrompts()
 
   var body: some View {
-    Picker("", selection: $selectedPrompt) {
-      Text("None").tag("")
-      ForEach(prompts, id: \.self) { prompt in
-        Text(prompt).tag(prompt)
+    if !prompts.isEmpty {
+      Picker("sys:", selection: $selectedPrompt) {
+        Text("None").tag("")
+        ForEach(prompts, id: \.self) { prompt in
+          Text(prompt).tag(prompt)
+        }
       }
+      .frame(width: 60, height: 10, alignment: .trailing)
     }
-    .frame(width: 100, height: 10)
-    .offset(x: -100, y: 5)
   }
 }
 
