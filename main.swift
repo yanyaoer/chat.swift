@@ -37,13 +37,20 @@ struct ChatMessage: Codable {
 
 struct ChatRequest: Codable {
   let model: String
-  let messages: [ChatMessage]
+  var messages: [ChatMessage]
   let stream: Bool
+}
+
+struct SystemPrompt: Codable {
+  let role: String
+  let content: String
 }
 
 class ChatHistory {
   static let shared = ChatHistory()
   private let historyPath: URL
+  private let promptsPath: URL
+  @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
 
   private init() {
     let configPath = FileManager.default.homeDirectoryForCurrentUser
@@ -53,6 +60,27 @@ class ChatHistory {
     try? FileManager.default.createDirectory(at: configPath, withIntermediateDirectories: true)
 
     historyPath = configPath.appendingPathComponent("history.md")
+    promptsPath = configPath.appendingPathComponent("prompts")
+    try? FileManager.default.createDirectory(at: promptsPath, withIntermediateDirectories: true)
+  }
+
+  func getAvailablePrompts() -> [String] {
+    do {
+      let files = try FileManager.default.contentsOfDirectory(atPath: promptsPath.path)
+      return files.filter { $0.hasSuffix(".md") }.map { String($0.dropLast(3)) }
+    } catch {
+      return []
+    }
+  }
+
+  func loadPromptContent(name: String) -> SystemPrompt? {
+    let fileURL = promptsPath.appendingPathComponent("\(name).md")
+    do {
+      let content = try String(contentsOf: fileURL)
+      return SystemPrompt(role: "system", content: content)
+    } catch {
+      return nil
+    }
   }
 
   func saveMessage(_ message: ChatMessage) {
@@ -61,9 +89,10 @@ class ChatHistory {
     let timestamp = dateFormatter.string(from: message.timestamp)
 
     let modelInfo = message.model.map { " [\($0)]" } ?? ""
+    let promptInfo = message.role == "system" ? " [Prompt: \(selectedPrompt)]" : ""
     let text = """
           
-      [\(timestamp)] \(message.role)\(modelInfo):
+      [\(timestamp)] \(message.role)\(modelInfo)\(promptInfo):
       \(message.content)
       """
 
@@ -143,12 +172,16 @@ struct App: SwiftUI.App {
   @State private var input = ""
   @StateObject private var streamDelegate = StreamDelegate()
   @AppStorage("modelname") public var modelname = OpenAIConfig.load().defaultModel
+  @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
   @FocusState private var focused: Bool
 
   var body: some Scene {
     WindowGroup {
       VStack(alignment: .leading) {
-        PopoverView(modelname: $modelname)
+        HStack {
+          PopoverView(modelname: $modelname)
+          PromptMenuView(selectedPrompt: $selectedPrompt)
+        }
 
         LLMInputView
         Divider()
@@ -213,9 +246,19 @@ struct App: SwiftUI.App {
     let userMessage = ChatMessage(role: "user", content: message, model: modelname)
     ChatHistory.shared.saveMessage(userMessage)
 
+    var messages: [ChatMessage] = []
+    if !selectedPrompt.isEmpty,
+      let prompt = ChatHistory.shared.loadPromptContent(name: selectedPrompt)
+    {
+      print(prompt)
+      messages.append(ChatMessage(role: prompt.role, content: prompt.content, model: nil))
+    }
+    messages.append(ChatMessage(role: "user", content: message, model: modelname))
+    print(messages, selectedPrompt)
+
     let chatRequest = ChatRequest(
       model: modelname,
-      messages: [ChatMessage(role: "user", content: message)],
+      messages: messages,
       stream: true
     )
 
@@ -259,6 +302,22 @@ struct PopoverView: View {
     .offset(x: 0, y: 5)
     .ignoresSafeArea()
     .frame(maxWidth: .infinity, maxHeight: 0, alignment: .trailing)
+  }
+}
+
+struct PromptMenuView: View {
+  @Binding var selectedPrompt: String
+  private let prompts = ChatHistory.shared.getAvailablePrompts()
+
+  var body: some View {
+    Picker("", selection: $selectedPrompt) {
+      Text("None").tag("")
+      ForEach(prompts, id: \.self) { prompt in
+        Text(prompt).tag(prompt)
+      }
+    }
+    .frame(width: 100, height: 10)
+    .offset(x: -100, y: 5)
   }
 }
 
