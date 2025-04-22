@@ -23,16 +23,53 @@ struct VisualEffect: NSViewRepresentable {
 
 struct ChatMessage: Codable {
   let role: String
-  let content: String
+  let content: MessageContent
   let timestamp: Date
   let model: String?
 
-  init(role: String, content: String, model: String? = nil) {
+  init(role: String, content: MessageContent, model: String? = nil) {
     self.role = role
     self.content = content
     self.timestamp = Date()
     self.model = model
   }
+}
+
+enum MessageContent: Codable {
+  case text(String)
+  case multimodal([ContentItem])
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    switch self {
+    case .text(let string):
+      try container.encode(string)
+    case .multimodal(let items):
+      try container.encode(items)
+    }
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if let string = try? container.decode(String.self) {
+      self = .text(string)
+    } else if let items = try? container.decode([ContentItem].self) {
+      self = .multimodal(items)
+    } else {
+      throw DecodingError.dataCorruptedError(
+        in: container, debugDescription: "Invalid message content")
+    }
+  }
+}
+
+struct ContentItem: Codable {
+  let type: String
+  let text: String?
+  let image_url: ImageURL?
+}
+
+struct ImageURL: Codable {
+  let url: String
 }
 
 struct ChatRequest: Codable {
@@ -90,10 +127,26 @@ class ChatHistory {
 
     let modelInfo = message.model.map { " [\($0)]" } ?? ""
     let promptInfo = message.role == "system" ? " [Prompt: \(selectedPrompt)]" : ""
+
+    let contentText: String
+    switch message.content {
+    case .text(let text):
+      contentText = text
+    case .multimodal(let items):
+      contentText = items.map { item in
+        if let text = item.text {
+          return text
+        } else if let imageUrl = item.image_url {
+          return "[Image: \(imageUrl.url)]"
+        }
+        return ""
+      }.joined(separator: "\n")
+    }
+
     let text = """
           
       [\(timestamp)] \(message.role)\(modelInfo)\(promptInfo):
-      \(message.content)
+      \(contentText)
       """
 
     if let data = text.data(using: .utf8) {
@@ -133,10 +186,10 @@ class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject {
               let finalResponse = currentResponse
               DispatchQueue.main.async {
                 let assistantMessage = ChatMessage(
-                  role: "assistant", content: finalResponse, model: self.currentModel)
+                  role: "assistant", content: .text(finalResponse), model: self.currentModel)
                 ChatHistory.shared.saveMessage(assistantMessage)
                 self.currentResponse = ""
-                print(line)
+                // print(line)
               }
               return
             }
@@ -176,6 +229,7 @@ struct App: SwiftUI.App {
   @AppStorage("modelname") public var modelname = OpenAIConfig.load().defaultModel
   @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
   @FocusState private var focused: Bool
+  @State private var currentImageContent: MessageContent?
 
   var body: some Scene {
     WindowGroup {
@@ -183,6 +237,10 @@ struct App: SwiftUI.App {
         HStack {
           PopoverView(modelname: $modelname)
           PromptMenuView(selectedPrompt: $selectedPrompt)
+
+          FileUploadButton(input: $input) { fileURL in
+            handleFileUpload(fileURL)
+          }
         }
         .offset(x: 0, y: 5)
         .ignoresSafeArea()
@@ -214,12 +272,14 @@ struct App: SwiftUI.App {
   }
 
   private var LLMInputView: some View {
-    TextField("write something..", text: $input).onSubmit {
-      streamDelegate.output = ""
-      sendMessage(message: self.input)
+    HStack {
+      TextField("write something..", text: $input).onSubmit {
+        streamDelegate.output = ""
+        sendMessage(message: self.input)
+      }
+      .textFieldStyle(.plain)
+      .focused($focused)
     }
-    .textFieldStyle(.plain)
-    .focused($focused)
     .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
   }
 
@@ -235,6 +295,42 @@ struct App: SwiftUI.App {
     .defaultScrollAnchor(.bottom)
   }
 
+  private func handleFileUpload(_ fileURL: URL) {
+    let fileType = fileURL.pathExtension.lowercased()
+    let supportedTypes = ["jpg", "jpeg", "png", "pdf"]
+
+    guard supportedTypes.contains(fileType) else {
+      print("Unsupported file type")
+      return
+    }
+
+    do {
+      // 确保文件可以被访问
+      guard fileURL.startAccessingSecurityScopedResource() else {
+        print("Failed to access the file")
+        return
+      }
+
+      defer {
+        fileURL.stopAccessingSecurityScopedResource()
+      }
+
+      // 直接读取文件数据，不复制文件
+      let fileData = try Data(contentsOf: fileURL)
+      let base64String = fileData.base64EncodedString()
+      let imageUrl = "data:image/\(fileType);base64,\(base64String)"
+
+      let contentItems = [
+        ContentItem(type: "text", text: self.input, image_url: nil),
+        ContentItem(type: "image_url", text: nil, image_url: ImageURL(url: imageUrl)),
+      ]
+
+      currentImageContent = .multimodal(contentItems)
+    } catch {
+      print("Error handling file: \(error.localizedDescription)")
+    }
+  }
+
   private func sendMessage(message: String) {
     let config = OpenAIConfig.load()
     guard let modelConfig = config.getConfig(for: modelname) else {
@@ -248,16 +344,21 @@ struct App: SwiftUI.App {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("Bearer \(modelConfig.apiKey)", forHTTPHeaderField: "Authorization")
 
-    let userMessage = ChatMessage(role: "user", content: message, model: modelname)
-    ChatHistory.shared.saveMessage(userMessage)
-
     var messages: [ChatMessage] = []
     if !selectedPrompt.isEmpty,
       let prompt = ChatHistory.shared.loadPromptContent(name: selectedPrompt)
     {
-      messages.append(ChatMessage(role: prompt.role, content: prompt.content, model: nil))
+      messages.append(ChatMessage(role: prompt.role, content: .text(prompt.content), model: nil))
     }
-    messages.append(ChatMessage(role: "user", content: message, model: modelname))
+
+    if let imageContent = currentImageContent {
+      messages.append(ChatMessage(role: "user", content: imageContent, model: modelname))
+      currentImageContent = nil
+    } else {
+      messages.append(ChatMessage(role: "user", content: .text(message), model: modelname))
+    }
+
+    print(messages)
 
     let chatRequest = ChatRequest(
       model: modelname,
@@ -295,12 +396,12 @@ struct PopoverView: View {
 
   var body: some View {
     ZStack {
-      Picker("", selection: $modelname) {
+      Picker("🧠", selection: $modelname) {
         ForEach(ModelData, id: \.self) { name in
           Text(name)
         }
       }
-      .frame(width: 100, height: 10, alignment: .trailing)
+      .frame(width: 105, height: 10, alignment: .trailing)
     }
   }
 }
@@ -311,13 +412,43 @@ struct PromptMenuView: View {
 
   var body: some View {
     if !prompts.isEmpty {
-      Picker("sys:", selection: $selectedPrompt) {
+      Picker("📄", selection: $selectedPrompt) {
         Text("None").tag("")
         ForEach(prompts, id: \.self) { prompt in
           Text(prompt).tag(prompt)
         }
       }
-      .frame(width: 60, height: 10, alignment: .trailing)
+      .frame(width: 100, height: 10, alignment: .trailing)
+    }
+  }
+}
+
+struct FileUploadButton: View {
+  @Binding var input: String
+  @State private var isFilePickerPresented = false
+  let onFileSelected: (URL) -> Void
+
+  var body: some View {
+    Button(action: {
+      isFilePickerPresented = true
+    }) {
+      Text("📎")
+        .font(.system(size: 12))
+    }
+    .frame(height: 10, alignment: .trailing)
+    .fileImporter(
+      isPresented: $isFilePickerPresented,
+      allowedContentTypes: [.image, .pdf],
+      allowsMultipleSelection: false
+    ) { result in
+      switch result {
+      case .success(let files):
+        if let file = files.first {
+          onFileSelected(file)
+        }
+      case .failure(let error):
+        print("Error selecting file: \(error.localizedDescription)")
+      }
     }
   }
 }
