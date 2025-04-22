@@ -130,14 +130,16 @@ class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject {
         if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
           do {
             if line.hasPrefix("data: [DONE]") {
-              let assistantMessage = ChatMessage(
-                role: "assistant", content: currentResponse, model: currentModel)
-              ChatHistory.shared.saveMessage(assistantMessage)
-              currentResponse = ""
-              print("DONE")
+              let finalResponse = currentResponse
+              DispatchQueue.main.async {
+                let assistantMessage = ChatMessage(
+                  role: "assistant", content: finalResponse, model: self.currentModel)
+                ChatHistory.shared.saveMessage(assistantMessage)
+                self.currentResponse = ""
+                print(line)
+              }
               return
             }
-            // print(line)
             if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
@@ -145,8 +147,8 @@ class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject {
               let content = delta["content"] as? String
             {
               DispatchQueue.main.async {
-                self.output += content
                 self.currentResponse += content
+                self.output += content
               }
             }
           } catch {
@@ -253,11 +255,9 @@ struct App: SwiftUI.App {
     if !selectedPrompt.isEmpty,
       let prompt = ChatHistory.shared.loadPromptContent(name: selectedPrompt)
     {
-      print(prompt)
       messages.append(ChatMessage(role: prompt.role, content: prompt.content, model: nil))
     }
     messages.append(ChatMessage(role: "user", content: message, model: modelname))
-    print(messages, selectedPrompt)
 
     let chatRequest = ChatRequest(
       model: modelname,
