@@ -4,13 +4,15 @@
 
 ## Dev:
 ```bash
-$ chmod +x main.swift
-$ ./main.swift
+$ swift run
 ```
 
 ## Build:
 ```bash
-$ swiftc main.swift -o chat_swift
+$ swift build -c release
+
+# execute
+$ ./.build/release/chat.swift
 ```
 
 ## Config:
@@ -104,3 +106,4 @@ ctrl + alt + shift + cmd - k	:	chat_swift
 - support multiple models and remember the last model
 - socks5proxy for gemini
 - set prompts folder
+- image upload and Understand

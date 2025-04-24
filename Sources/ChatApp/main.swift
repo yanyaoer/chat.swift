@@ -83,6 +83,7 @@ struct SystemPrompt: Codable {
   let content: String
 }
 
+@MainActor
 class ChatHistory {
   static let shared = ChatHistory()
   private let historyPath: URL
@@ -163,7 +164,7 @@ class ChatHistory {
   }
 }
 
-class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject {
+final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable {
   @Published var output: String = ""
   private var currentResponse: String = ""
   private var currentModel: String = ""
@@ -235,7 +236,7 @@ struct App: SwiftUI.App {
     WindowGroup {
       VStack(alignment: .leading) {
         HStack {
-          PopoverView(modelname: $modelname)
+          ModelMenuView(modelname: $modelname)
           PromptMenuView(selectedPrompt: $selectedPrompt)
 
           FileUploadButton(input: $input) { fileURL in
@@ -390,38 +391,118 @@ struct App: SwiftUI.App {
   }
 }
 
-struct PopoverView: View {
-  @State private var ModelData = OpenAIConfig.load().models.values.flatMap { $0.models }
-  @Binding public var modelname: String
-
-  var body: some View {
-    ZStack {
-      Picker("🧠", selection: $modelname) {
-        ForEach(ModelData, id: \.self) { name in
-          Text(name)
+struct PopoverSelectorRow<Content: View>: View {
+    let label: () -> Content
+    let isSelected: Bool
+    let onTap: () -> Void
+    @State private var isHovering = false
+    var body: some View {
+        Button(action: onTap) {
+            label()
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    Group {
+                        if isSelected {
+                            Color.accentColor.opacity(0.18)
+                        } else if isHovering {
+                            Color.primary.opacity(0.07)
+                        } else {
+                            Color.clear
+                        }
+                    }
+                )
+                .cornerRadius(6)
         }
-      }
-      .frame(width: 105, height: 10, alignment: .trailing)
+        .buttonStyle(PlainButtonStyle())
+        .onHover { hover in
+            isHovering = hover
+        }
     }
-  }
+}
+
+struct PopoverSelector<T: Hashable & CustomStringConvertible>: View {
+    @Binding var selection: T
+    let options: [T]
+    let label: () -> AnyView
+    // let width: CGFloat
+
+    @State private var showPopover = false
+
+    var body: some View {
+        Button(action: { showPopover.toggle() }) {
+            label()
+                //.frame(width: width, height: 24)
+        }
+        .buttonStyle(PlainButtonStyle())
+        .popover(isPresented: $showPopover, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(options, id: \ .self) { option in
+                    PopoverSelectorRow(
+                        label: {
+                            HStack {
+                                Text(option.description)
+                                    .foregroundColor(selection == option ? .accentColor : .primary)
+                                if selection == option {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.accentColor)
+                                }
+                            }
+                        },
+                        isSelected: selection == option,
+                        onTap: {
+                            selection = option
+                            showPopover = false
+                        }
+                    )
+                }
+            }
+            .padding(10)
+            //.frame(minWidth: width)
+        }
+    }
+}
+
+
+struct ModelMenuView: View {
+    @Binding public var modelname: String
+    private let models: [String] = OpenAIConfig.load().models.values.flatMap { $0.models }
+    var body: some View {
+        PopoverSelector(selection: $modelname, options: models, label: {
+            AnyView(
+                HStack(spacing: 6) {
+                    Text("🧠").font(.system(size: 14))
+                    Text(modelname).font(.system(size: 12)).foregroundColor(.primary)
+                }
+                .padding(.horizontal, 2)
+            )
+        })
+        .frame(alignment: .trailing)
+    }
 }
 
 struct PromptMenuView: View {
-  @Binding var selectedPrompt: String
-  private let prompts = ChatHistory.shared.getAvailablePrompts()
-
-  var body: some View {
-    if !prompts.isEmpty {
-      Picker("📄", selection: $selectedPrompt) {
-        Text("None").tag("")
-        ForEach(prompts, id: \.self) { prompt in
-          Text(prompt).tag(prompt)
-        }
-      }
-      .frame(width: 100, height: 10, alignment: .trailing)
+    @Binding var selectedPrompt: String
+    private var prompts: [String] {
+        ["None"] + ChatHistory.shared.getAvailablePrompts()
     }
-  }
+    var body: some View {
+        PopoverSelector(selection: $selectedPrompt, options: prompts, label: {
+            AnyView(
+                HStack(spacing: 6) {
+                    Text("📄").font(.system(size: 12))
+                    if selectedPrompt != "None" && !selectedPrompt.isEmpty {
+                        Text(selectedPrompt).font(.system(size: 12)).foregroundColor(.primary)
+                    }
+                }
+                .padding(.horizontal, 2)
+            )
+        })
+        .frame(alignment: .trailing)
+    }
 }
+
 
 struct FileUploadButton: View {
   @Binding var input: String
@@ -434,7 +515,9 @@ struct FileUploadButton: View {
     }) {
       Text("📎")
         .font(.system(size: 12))
+        .padding(.horizontal, 2)
     }
+    .buttonStyle(PlainButtonStyle())
     .frame(height: 10, alignment: .trailing)
     .fileImporter(
       isPresented: $isFilePickerPresented,
