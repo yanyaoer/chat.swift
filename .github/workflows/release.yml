@@ -9,12 +9,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build executable for release
-        run: swiftc main.swift -o chat_swift 
+        run: swift build -c release
       - name: Compress archive
-        run: tar -czf chat_swift.tar.gz chat_swift
+        run: tar -czf chat_swift.${{ github.ref_name }}.tar.gz .build/release/chat_swift
       - name: Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
         with:
-          files: chat_swift.tar.gz
+          files: chat_swift.${{ github.ref_name }}.tar.gz
           token: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
