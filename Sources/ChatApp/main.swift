@@ -102,7 +102,7 @@ class ChatHistory {
     try? FileManager.default.createDirectory(at: promptsPath, withIntermediateDirectories: true)
   }
 
-  func getAvailablePrompts() -> [String] {
+  func getAvailablePrompts() async -> [String] {
     do {
       let files = try FileManager.default.contentsOfDirectory(atPath: promptsPath.path)
       return files.filter { $0.hasSuffix(".md") }.map { String($0.dropLast(3)) }
@@ -499,9 +499,8 @@ struct ModelMenuView: View {
 
 struct PromptMenuView: View {
   @Binding var selectedPrompt: String
-  private var prompts: [String] {
-    ["None"] + ChatHistory.shared.getAvailablePrompts()
-  }
+  @State private var prompts: [String] = ["None"]
+  
   var body: some View {
     PopoverSelector(
       selection: $selectedPrompt, options: prompts,
@@ -518,6 +517,11 @@ struct PromptMenuView: View {
       }
     )
     .frame(alignment: .trailing)
+    .task {
+      // Load prompts asynchronously when the view appears
+      let availablePrompts = await ChatHistory.shared.getAvailablePrompts()
+      prompts = ["None"] + availablePrompts
+    }
   }
 }
 
