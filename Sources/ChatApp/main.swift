@@ -164,10 +164,12 @@ class ChatHistory {
   }
 }
 
-final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable {
+final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable
+{
   @Published var output: String = ""
   private var currentResponse: String = ""
   private var currentModel: String = ""
+  private var lastUserInput: String = ""
 
   override init() {
     super.init()
@@ -175,6 +177,10 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
 
   func setModel(_ model: String) {
     currentModel = model
+  }
+
+  func setLastUserInput(_ input: String) {
+    lastUserInput = input
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -186,6 +192,11 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
             if line.hasPrefix("data: [DONE]") {
               let finalResponse = currentResponse
               DispatchQueue.main.async {
+                if !self.lastUserInput.isEmpty {
+                  let userMessage = ChatMessage(
+                    role: "user", content: .text(self.lastUserInput), model: self.currentModel)
+                  ChatHistory.shared.saveMessage(userMessage)
+                }
                 let assistantMessage = ChatMessage(
                   role: "assistant", content: .text(finalResponse), model: self.currentModel)
                 ChatHistory.shared.saveMessage(assistantMessage)
@@ -276,6 +287,8 @@ struct App: SwiftUI.App {
     HStack {
       TextField("write something..", text: $input).onSubmit {
         streamDelegate.output = ""
+        streamDelegate.setLastUserInput(self.input)
+        streamDelegate.setModel(modelname)
         sendMessage(message: self.input)
       }
       .textFieldStyle(.plain)
@@ -385,124 +398,127 @@ struct App: SwiftUI.App {
 
     let session = URLSession(
       configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
-    streamDelegate.setModel(modelname)
     let task = session.dataTask(with: request)
     task.resume()
   }
 }
 
 struct PopoverSelectorRow<Content: View>: View {
-    let label: () -> Content
-    let isSelected: Bool
-    let onTap: () -> Void
-    @State private var isHovering = false
-    var body: some View {
-        Button(action: onTap) {
-            label()
-                .padding(.vertical, 6)
-                .padding(.horizontal, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    Group {
-                        if isSelected {
-                            Color.accentColor.opacity(0.18)
-                        } else if isHovering {
-                            Color.primary.opacity(0.07)
-                        } else {
-                            Color.clear
-                        }
-                    }
-                )
-                .cornerRadius(6)
-        }
-        .buttonStyle(PlainButtonStyle())
-        .onHover { hover in
-            isHovering = hover
-        }
+  let label: () -> Content
+  let isSelected: Bool
+  let onTap: () -> Void
+  @State private var isHovering = false
+  var body: some View {
+    Button(action: onTap) {
+      label()
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+          Group {
+            if isSelected {
+              Color.accentColor.opacity(0.18)
+            } else if isHovering {
+              Color.primary.opacity(0.07)
+            } else {
+              Color.clear
+            }
+          }
+        )
+        .cornerRadius(6)
     }
+    .buttonStyle(PlainButtonStyle())
+    .onHover { hover in
+      isHovering = hover
+    }
+  }
 }
 
 struct PopoverSelector<T: Hashable & CustomStringConvertible>: View {
-    @Binding var selection: T
-    let options: [T]
-    let label: () -> AnyView
-    // let width: CGFloat
+  @Binding var selection: T
+  let options: [T]
+  let label: () -> AnyView
+  // let width: CGFloat
 
-    @State private var showPopover = false
+  @State private var showPopover = false
 
-    var body: some View {
-        Button(action: { showPopover.toggle() }) {
-            label()
-                //.frame(width: width, height: 24)
-        }
-        .buttonStyle(PlainButtonStyle())
-        .popover(isPresented: $showPopover, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(options, id: \ .self) { option in
-                    PopoverSelectorRow(
-                        label: {
-                            HStack {
-                                Text(option.description)
-                                    .foregroundColor(selection == option ? .accentColor : .primary)
-                                if selection == option {
-                                    Image(systemName: "checkmark")
-                                        .foregroundColor(.accentColor)
-                                }
-                            }
-                        },
-                        isSelected: selection == option,
-                        onTap: {
-                            selection = option
-                            showPopover = false
-                        }
-                    )
-                }
-            }
-            .padding(10)
-            //.frame(minWidth: width)
-        }
+  var body: some View {
+    Button(action: { showPopover.toggle() }) {
+      label()
+      //.frame(width: width, height: 24)
     }
+    .buttonStyle(PlainButtonStyle())
+    .popover(isPresented: $showPopover, arrowEdge: .bottom) {
+      VStack(alignment: .leading, spacing: 0) {
+        ForEach(options, id: \.self) { option in
+          PopoverSelectorRow(
+            label: {
+              HStack {
+                Text(option.description)
+                  .foregroundColor(selection == option ? .accentColor : .primary)
+                if selection == option {
+                  Image(systemName: "checkmark")
+                    .foregroundColor(.accentColor)
+                }
+              }
+            },
+            isSelected: selection == option,
+            onTap: {
+              selection = option
+              showPopover = false
+            }
+          )
+        }
+      }
+      .padding(10)
+      //.frame(minWidth: width)
+    }
+  }
 }
 
-
 struct ModelMenuView: View {
-    @Binding public var modelname: String
-    private let models: [String] = OpenAIConfig.load().models.values.flatMap { $0.models }
-    var body: some View {
-        PopoverSelector(selection: $modelname, options: models, label: {
-            AnyView(
-                HStack(spacing: 6) {
-                    Text("🧠").font(.system(size: 14))
-                    Text(modelname).font(.system(size: 12)).foregroundColor(.primary)
-                }
-                .padding(.horizontal, 2)
-            )
-        })
-        .frame(alignment: .trailing)
-    }
+  @Binding public var modelname: String
+  private let models: [String] = OpenAIConfig.load().models.values.flatMap { $0.models }
+  var body: some View {
+    PopoverSelector(
+      selection: $modelname, options: models,
+      label: {
+        AnyView(
+          HStack(spacing: 6) {
+            Text("🧠").font(.system(size: 14))
+            Text(modelname).font(.system(size: 12)).foregroundColor(.primary)
+          }
+          .padding(.horizontal, 2)
+        )
+      }
+    )
+    .frame(alignment: .trailing)
+  }
 }
 
 struct PromptMenuView: View {
-    @Binding var selectedPrompt: String
-    private var prompts: [String] {
-        ["None"] + ChatHistory.shared.getAvailablePrompts()
-    }
-    var body: some View {
-        PopoverSelector(selection: $selectedPrompt, options: prompts, label: {
-            AnyView(
-                HStack(spacing: 6) {
-                    Text("📄").font(.system(size: 12))
-                    if selectedPrompt != "None" && !selectedPrompt.isEmpty {
-                        Text(selectedPrompt).font(.system(size: 12)).foregroundColor(.primary)
-                    }
-                }
-                .padding(.horizontal, 2)
-            )
-        })
-        .frame(alignment: .trailing)
-    }
+  @Binding var selectedPrompt: String
+  private var prompts: [String] {
+    ["None"] + ChatHistory.shared.getAvailablePrompts()
+  }
+  var body: some View {
+    PopoverSelector(
+      selection: $selectedPrompt, options: prompts,
+      label: {
+        AnyView(
+          HStack(spacing: 6) {
+            Text("📄").font(.system(size: 12))
+            if selectedPrompt != "None" && !selectedPrompt.isEmpty {
+              Text(selectedPrompt).font(.system(size: 12)).foregroundColor(.primary)
+            }
+          }
+          .padding(.horizontal, 2)
+        )
+      }
+    )
+    .frame(alignment: .trailing)
+  }
 }
-
 
 struct FileUploadButton: View {
   @Binding var input: String
