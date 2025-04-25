@@ -52,7 +52,7 @@ Use your own config file located at `.config/chat.swift/config.json`
 * support socks5 proxy only
 
 ## Prompts
-reading markdown file to `.config/chat_swift/prompts/` as system prompt
+reading markdown file to `.config/chat.swift/prompts/` as system prompt
 content. eg `manus.md`
 
 ```
@@ -96,7 +96,7 @@ You operate in an agent loop, iteratively completing tasks through these steps:
 example with [skhd](https://github.com/koekeishiya/skhd) or add Keyboard Shortcuts by System Settings
 
 ```
-ctrl + alt + shift + cmd - k	:	chat_swift
+ctrl + alt + shift + cmd - k	:	chat.swift
 ```
 
 ## Feature:
