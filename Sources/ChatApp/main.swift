@@ -233,6 +233,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 }
 
+@MainActor
 struct App: SwiftUI.App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
