@@ -268,7 +268,7 @@ struct App: SwiftUI.App {
         }
       }
       .background(VisualEffect().ignoresSafeArea())
-      .frame(minWidth: 300, minHeight: 150, alignment: .topLeading)
+      .frame(minWidth: 400, minHeight: 150, alignment: .topLeading)
       .onReceive(
         NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification),
         perform: { _ in
@@ -523,18 +523,29 @@ struct PromptMenuView: View {
 struct FileUploadButton: View {
   @Binding var input: String
   @State private var isFilePickerPresented = false
+  @State private var selectedFileName: String? = nil
   let onFileSelected: (URL) -> Void
 
   var body: some View {
-    Button(action: {
-      isFilePickerPresented = true
-    }) {
-      Text("📎")
-        .font(.system(size: 12))
-        .padding(.horizontal, 2)
+    HStack(spacing: 4) {
+      Button(action: {
+        isFilePickerPresented = true
+      }) {
+        Text("📎")
+          .font(.system(size: 12))
+          .padding(.horizontal, 2)
+      }
+      .buttonStyle(PlainButtonStyle())
+      .frame(height: 10, alignment: .trailing)
+      if let fileName = selectedFileName {
+        Text(fileName)
+          .font(.system(size: 11))
+          .foregroundColor(.secondary)
+          .lineLimit(1)
+          .truncationMode(.middle)
+      }
     }
-    .buttonStyle(PlainButtonStyle())
-    .frame(height: 10, alignment: .trailing)
+    .padding(.trailing, 4)
     .fileImporter(
       isPresented: $isFilePickerPresented,
       allowedContentTypes: [.image, .pdf],
@@ -543,6 +554,7 @@ struct FileUploadButton: View {
       switch result {
       case .success(let files):
         if let file = files.first {
+          selectedFileName = file.lastPathComponent
           onFileSelected(file)
         }
       case .failure(let error):
@@ -559,6 +571,10 @@ DispatchQueue.main.async {
   NSApplication.shared.activate(ignoringOtherApps: true)
   if let window = NSApplication.shared.windows.first {
     window.level = .floating
+    // 隐藏左上角关闭、最大化、缩小按钮
+    window.standardWindowButton(.closeButton)?.isHidden = true
+    window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+    window.standardWindowButton(.zoomButton)?.isHidden = true
   }
 }
 
