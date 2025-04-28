@@ -171,7 +171,7 @@ class ChatHistory {
 
 final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable
 {
-  @Published var output: String = ""
+  @Published var output: AttributedString = ""
   private var currentResponse: String = ""
   private var currentModel: String = ""
   private var lastUserInput: String = ""
@@ -206,24 +206,44 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
                 let assistantMessage = ChatMessage(
                   role: "assistant", content: .text(finalResponse), model: self.currentModel)
                 ChatHistory.shared.saveMessage(assistantMessage)
-                self.currentResponse = ""
-                // print(line)
               }
               return
             }
             if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
-              let delta = firstChoice["delta"] as? [String: Any],
-              let content = (delta["reasoning_content"] as? String) ?? (delta["content"] as? String)
+              let delta = firstChoice["delta"] as? [String: Any]
             {
-              DispatchQueue.main.async {
-                self.currentResponse += content
-                self.output += content
+              var contentChunk = ""
+              var isReasoning = false
+
+              if let reasoningContent = delta["reasoning_content"] as? String {
+                contentChunk = reasoningContent
+                isReasoning = true
+              } else if let regularContent = delta["content"] as? String {
+                contentChunk = regularContent
+              }
+
+              if !contentChunk.isEmpty {
+                DispatchQueue.main.async {
+                  self.currentResponse += contentChunk
+
+                  var attributedChunk = AttributedString(contentChunk)
+                  if isReasoning {
+                    attributedChunk.foregroundColor = .secondary
+                  }
+                  self.output += attributedChunk
+                }
               }
             }
           } catch {
             print("Error parsing JSON: \(error)")
+            DispatchQueue.main.async {
+              var errorChunk = AttributedString(
+                "\nError parsing stream: \(error.localizedDescription)")
+              errorChunk.foregroundColor = .red
+              self.output += errorChunk
+            }
           }
         }
       }
@@ -233,7 +253,9 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     if let error = error {
       DispatchQueue.main.async {
-        self.output += "\nError: \(error.localizedDescription)"
+        var errorChunk = AttributedString("\nError: \(error.localizedDescription)")
+        errorChunk.foregroundColor = .red
+        self.output += errorChunk
       }
     }
   }
@@ -268,7 +290,7 @@ struct App: SwiftUI.App {
         LLMInputView
         Divider()
 
-        if streamDelegate.output.count > 0 {
+        if !streamDelegate.output.characters.isEmpty {
           LLMOutputView
         } else {
           Spacer(minLength: 20)
@@ -293,7 +315,7 @@ struct App: SwiftUI.App {
   private var LLMInputView: some View {
     HStack {
       TextField("write something..", text: $input).onSubmit {
-        streamDelegate.output = ""
+        streamDelegate.output = AttributedString("")
         streamDelegate.setLastUserInput(self.input)
         streamDelegate.setModel(modelname)
         sendMessage(message: self.input)
@@ -326,7 +348,6 @@ struct App: SwiftUI.App {
     }
 
     do {
-      // 确保文件可以被访问
       guard fileURL.startAccessingSecurityScopedResource() else {
         print("Failed to access the file")
         return
@@ -336,7 +357,6 @@ struct App: SwiftUI.App {
         fileURL.stopAccessingSecurityScopedResource()
       }
 
-      // 直接读取文件数据，不复制文件
       let fileData = try Data(contentsOf: fileURL)
       let base64String = fileData.base64EncodedString()
       let imageUrl = "data:image/\(fileType);base64,\(base64String)"
@@ -353,6 +373,10 @@ struct App: SwiftUI.App {
   }
 
   private func sendMessage(message: String) {
+    // Reset output before sending a new message
+    // This is already handled in LLMInputView's onSubmit, but double-checking here is safe.
+    // streamDelegate.output = AttributedString("") // Redundant, handled in onSubmit
+
     let config = OpenAIConfig.load()
     guard let modelConfig = config.getConfig(for: modelname) else {
       print("Error: Model configuration not found")
@@ -528,7 +552,6 @@ struct PromptMenuView: View {
     )
     .frame(alignment: .trailing)
     .task {
-      // Load prompts asynchronously when the view appears
       let availablePrompts = await ChatHistory.shared.getAvailablePrompts()
       prompts = ["None"] + availablePrompts
     }
