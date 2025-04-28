@@ -107,10 +107,61 @@ class ChatHistory {
     try? FileManager.default.createDirectory(at: promptsPath, withIntermediateDirectories: true)
   }
 
+  func handleFileUpload(fileURL: URL, associatedText: String?) async -> MessageContent? {
+    let fileType = fileURL.pathExtension.lowercased()
+    let supportedImageTypes = ["jpg", "jpeg", "png", "gif", "webp"]
+
+    guard supportedImageTypes.contains(fileType) else {
+      print("Unsupported file type: \(fileType)")
+      return nil
+    }
+
+    guard fileURL.startAccessingSecurityScopedResource() else {
+      print("Failed to access the file at \(fileURL.path)")
+      return nil
+    }
+    defer {
+      fileURL.stopAccessingSecurityScopedResource()
+    }
+
+    do {
+      let fileData = try Data(contentsOf: fileURL)
+      let base64String = fileData.base64EncodedString()
+
+      let mimeType: String
+      switch fileType {
+      case "jpg", "jpeg": mimeType = "image/jpeg"
+      case "png": mimeType = "image/png"
+      case "gif": mimeType = "image/gif"
+      case "webp": mimeType = "image/webp"
+      default: mimeType = "application/octet-stream"
+      }
+
+      let imageUrl = "data:\(mimeType);base64,\(base64String)"
+
+      var contentItems = [ContentItem]()
+      if let text = associatedText, !text.isEmpty {
+        contentItems.append(ContentItem(type: "text", text: text, image_url: nil))
+      }
+      contentItems.append(
+        ContentItem(type: "image_url", text: nil, image_url: ImageURL(url: imageUrl)))
+
+      guard !contentItems.isEmpty else {
+        print("Error: No content items created for file upload.")
+        return nil
+      }
+      return .multimodal(contentItems)
+
+    } catch {
+      print("Error reading or encoding file: \(error.localizedDescription)")
+      return nil
+    }
+  }
+
   func getAvailablePrompts() async -> [String] {
     do {
       let files = try FileManager.default.contentsOfDirectory(atPath: promptsPath.path)
-      return files.filter { $0.hasSuffix(".md") }.map { String($0.dropLast(3)) }
+      return files.filter { $0.hasSuffix(".md") }.map { String($0.dropLast(3)) }.sorted()
     } catch {
       return []
     }
@@ -143,7 +194,11 @@ class ChatHistory {
         if let text = item.text {
           return text
         } else if let imageUrl = item.image_url {
-          return "[Image: \(imageUrl.url)]"
+          let displayUrl =
+            imageUrl.url.count > 100
+            ? String(imageUrl.url.prefix(50)) + "..." + String(imageUrl.url.suffix(20))
+            : imageUrl.url
+          return "[Image: \(displayUrl)]"
         }
         return ""
       }.joined(separator: "\n")
@@ -167,6 +222,83 @@ class ChatHistory {
       }
     }
   }
+
+  func sendMessage(
+    userText: String?,
+    messageContent: MessageContent? = nil,
+    modelname: String,
+    selectedPrompt: String,
+    streamDelegate: StreamDelegate
+  ) async {
+    let config = OpenAIConfig.load()
+    guard let modelConfig = config.getConfig(for: modelname) else {
+      print("Error: Model configuration not found for \(modelname)")
+      return
+    }
+
+    let url = URL(string: "\(modelConfig.baseURL)/chat/completions")!
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("Bearer \(modelConfig.apiKey)", forHTTPHeaderField: "Authorization")
+
+    var messagesToSend: [ChatMessage] = []
+
+    if !selectedPrompt.isEmpty, selectedPrompt != "None",
+      let prompt = loadPromptContent(name: selectedPrompt)
+    {
+      let systemMessage = ChatMessage(role: prompt.role, content: .text(prompt.content), model: nil)
+      messagesToSend.append(systemMessage)
+    }
+
+    let finalContent: MessageContent
+    if let content = messageContent {
+      finalContent = content
+    } else if let text = userText, !text.isEmpty {
+      finalContent = .text(text)
+    } else {
+      print("Error: No message content to send.")
+      return
+    }
+
+    let userMessage = ChatMessage(role: "user", content: finalContent, model: modelname)
+    messagesToSend.append(userMessage)
+    saveMessage(userMessage)
+
+    let chatRequest = ChatRequest(
+      model: modelname, messages: messagesToSend, stream: true
+    )
+
+    do {
+      let encoder = JSONEncoder()
+      request.httpBody = try encoder.encode(chatRequest)
+    } catch {
+      print("Error encoding request: \(error)")
+      return
+    }
+
+    let sessionConfig = URLSessionConfiguration.default
+    if let proxyEnabled = modelConfig.proxyEnabled, proxyEnabled,
+      let proxyHost = modelConfig.proxyHost,
+      let proxyPort = modelConfig.proxyPort
+    {
+      sessionConfig.connectionProxyDictionary = [
+        kCFNetworkProxiesSOCKSEnable: true,
+        kCFNetworkProxiesSOCKSProxy: proxyHost,
+        kCFNetworkProxiesSOCKSPort: proxyPort,
+        kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5,
+      ]
+      // print("Using SOCKS5 proxy: \(proxyHost):\(proxyPort)")
+    }
+
+    streamDelegate.output = AttributedString("")
+    streamDelegate.setModel(modelname)
+
+    let session = URLSession(
+      configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
+    let task = session.dataTask(with: request)
+    task.resume()
+  }
 }
 
 final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable
@@ -174,7 +306,6 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   @Published var output: AttributedString = ""
   private var currentResponse: String = ""
   private var currentModel: String = ""
-  private var lastUserInput: String = ""
 
   override init() {
     super.init()
@@ -184,10 +315,6 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
     currentModel = model
   }
 
-  func setLastUserInput(_ input: String) {
-    lastUserInput = input
-  }
-
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
     if let text = String(data: data, encoding: .utf8) {
       let lines = text.components(separatedBy: "\n")
@@ -195,20 +322,19 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         // print(line)
         if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
           do {
-            if line.hasPrefix("data: [DONE]") {
+            if line.contains("data: [DONE]") {
               let finalResponse = currentResponse
               DispatchQueue.main.async {
-                if !self.lastUserInput.isEmpty {
-                  let userMessage = ChatMessage(
-                    role: "user", content: .text(self.lastUserInput), model: self.currentModel)
-                  ChatHistory.shared.saveMessage(userMessage)
+                if !finalResponse.isEmpty {
+                  let assistantMessage = ChatMessage(
+                    role: "assistant", content: .text(finalResponse), model: self.currentModel)
+                  ChatHistory.shared.saveMessage(assistantMessage)
                 }
-                let assistantMessage = ChatMessage(
-                  role: "assistant", content: .text(finalResponse), model: self.currentModel)
-                ChatHistory.shared.saveMessage(assistantMessage)
+                self.currentResponse = ""
               }
               return
             }
+
             if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
@@ -225,7 +351,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
               }
 
               if !contentChunk.isEmpty {
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [isReasoning, contentChunk] in
                   self.currentResponse += contentChunk
 
                   var attributedChunk = AttributedString(contentChunk)
@@ -237,12 +363,14 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
               }
             }
           } catch {
-            print("Error parsing JSON: \(error)")
-            DispatchQueue.main.async {
-              var errorChunk = AttributedString(
-                "\nError parsing stream: \(error.localizedDescription)")
-              errorChunk.foregroundColor = .red
-              self.output += errorChunk
+            if !line.contains("data: [DONE]") {
+              print("Error parsing JSON line: \(line), Error: \(error)")
+              DispatchQueue.main.async {
+                var errorChunk = AttributedString(
+                  "\nError parsing stream chunk: \(error.localizedDescription)")
+                errorChunk.foregroundColor = .red
+                self.output += errorChunk
+              }
             }
           }
         }
@@ -253,10 +381,14 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     if let error = error {
       DispatchQueue.main.async {
-        var errorChunk = AttributedString("\nError: \(error.localizedDescription)")
+        self.currentResponse = ""
+        var errorChunk = AttributedString("\nNetwork Error: \(error.localizedDescription)")
         errorChunk.foregroundColor = .red
         self.output += errorChunk
       }
+    } else {
+      // Successful completion is mostly handled by the [DONE] message.
+      // Resetting currentResponse is handled within the [DONE] block.
     }
   }
 }
@@ -270,7 +402,8 @@ struct App: SwiftUI.App {
   @AppStorage("modelname") public var modelname = OpenAIConfig.load().defaultModel
   @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
   @FocusState private var focused: Bool
-  @State private var currentImageContent: MessageContent?
+  @State private var selectedFileURL: URL? = nil
+  @State private var selectedFileName: String? = nil
 
   var body: some Scene {
     WindowGroup {
@@ -279,8 +412,8 @@ struct App: SwiftUI.App {
           ModelMenuView(modelname: $modelname)
           PromptMenuView(selectedPrompt: $selectedPrompt)
 
-          FileUploadButton(input: $input) { fileURL in
-            handleFileUpload(fileURL)
+          FileUploadButton(selectedFileName: $selectedFileName) { fileURL in
+            self.selectedFileURL = fileURL
           }
         }
         .offset(x: 0, y: 5)
@@ -314,16 +447,50 @@ struct App: SwiftUI.App {
 
   private var LLMInputView: some View {
     HStack {
-      TextField("write something..", text: $input).onSubmit {
-        streamDelegate.output = AttributedString("")
-        streamDelegate.setLastUserInput(self.input)
-        streamDelegate.setModel(modelname)
-        sendMessage(message: self.input)
-      }
-      .textFieldStyle(.plain)
-      .focused($focused)
+      TextField("write something..", text: $input, axis: .vertical)
+        .lineLimit(1...5)
+        .onSubmit {
+          Task {
+            await submitInput()
+          }
+        }
+        .textFieldStyle(.plain)
+        .focused($focused)
     }
     .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+  }
+
+  private func submitInput() async {
+    let textToSend = self.input
+    let fileURLToSend = self.selectedFileURL
+
+    self.selectedFileURL = nil
+    self.selectedFileName = nil
+
+    if let url = fileURLToSend {
+      if let contentToSend = await ChatHistory.shared.handleFileUpload(
+        fileURL: url,
+        associatedText: textToSend
+      ) {
+        await ChatHistory.shared.sendMessage(
+          userText: nil,
+          messageContent: contentToSend,
+          modelname: modelname,
+          selectedPrompt: selectedPrompt,
+          streamDelegate: streamDelegate
+        )
+      } else {
+        print("Error processing file upload, message not sent.")
+      }
+    } else if !textToSend.isEmpty {
+      await ChatHistory.shared.sendMessage(
+        userText: textToSend,
+        messageContent: nil,
+        modelname: modelname,
+        selectedPrompt: selectedPrompt,
+        streamDelegate: streamDelegate
+      )
+    }
   }
 
   private var LLMOutputView: some View {
@@ -336,105 +503,6 @@ struct App: SwiftUI.App {
         .lineSpacing(5)
     }
     .defaultScrollAnchor(.bottom)
-  }
-
-  private func handleFileUpload(_ fileURL: URL) {
-    let fileType = fileURL.pathExtension.lowercased()
-    let supportedTypes = ["jpg", "jpeg", "png", "pdf"]
-
-    guard supportedTypes.contains(fileType) else {
-      print("Unsupported file type")
-      return
-    }
-
-    do {
-      guard fileURL.startAccessingSecurityScopedResource() else {
-        print("Failed to access the file")
-        return
-      }
-
-      defer {
-        fileURL.stopAccessingSecurityScopedResource()
-      }
-
-      let fileData = try Data(contentsOf: fileURL)
-      let base64String = fileData.base64EncodedString()
-      let imageUrl = "data:image/\(fileType);base64,\(base64String)"
-
-      let contentItems = [
-        ContentItem(type: "text", text: self.input, image_url: nil),
-        ContentItem(type: "image_url", text: nil, image_url: ImageURL(url: imageUrl)),
-      ]
-
-      currentImageContent = .multimodal(contentItems)
-    } catch {
-      print("Error handling file: \(error.localizedDescription)")
-    }
-  }
-
-  private func sendMessage(message: String) {
-    // Reset output before sending a new message
-    // This is already handled in LLMInputView's onSubmit, but double-checking here is safe.
-    // streamDelegate.output = AttributedString("") // Redundant, handled in onSubmit
-
-    let config = OpenAIConfig.load()
-    guard let modelConfig = config.getConfig(for: modelname) else {
-      print("Error: Model configuration not found")
-      return
-    }
-
-    let url = URL(string: "\(modelConfig.baseURL)/chat/completions")!
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("Bearer \(modelConfig.apiKey)", forHTTPHeaderField: "Authorization")
-
-    var messages: [ChatMessage] = []
-    if !selectedPrompt.isEmpty,
-      let prompt = ChatHistory.shared.loadPromptContent(name: selectedPrompt)
-    {
-      messages.append(ChatMessage(role: prompt.role, content: .text(prompt.content)))
-    }
-
-    if let imageContent = currentImageContent {
-      messages.append(ChatMessage(role: "user", content: imageContent, model: modelname))
-      currentImageContent = nil
-    } else {
-      let reasoning_effort = modelname.contains("gemini-2") ? "medium" : nil
-      messages.append(
-        ChatMessage(
-          role: "user", content: .text(message),
-          model: modelname, reasoning_effort: reasoning_effort))
-    }
-
-    print(messages)
-
-    let chatRequest = ChatRequest(
-      model: modelname,
-      messages: messages,
-      stream: true
-    )
-
-    let encoder = JSONEncoder()
-    request.httpBody = try? encoder.encode(chatRequest)
-
-    let sessionConfig = URLSessionConfiguration.default
-    if let proxyEnabled = modelConfig.proxyEnabled, proxyEnabled,
-      let proxyHost = modelConfig.proxyHost,
-      let proxyPort = modelConfig.proxyPort
-    {
-      sessionConfig.connectionProxyDictionary = [
-        kCFNetworkProxiesSOCKSEnable: true,
-        kCFNetworkProxiesSOCKSProxy: proxyHost,
-        kCFNetworkProxiesSOCKSPort: proxyPort,
-        kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5,
-      ]
-    }
-
-    let session = URLSession(
-      configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
-    let task = session.dataTask(with: request)
-    task.resume()
   }
 }
 
@@ -473,14 +541,12 @@ struct PopoverSelector<T: Hashable & CustomStringConvertible>: View {
   @Binding var selection: T
   let options: [T]
   let label: () -> AnyView
-  // let width: CGFloat
 
   @State private var showPopover = false
 
   var body: some View {
     Button(action: { showPopover.toggle() }) {
       label()
-      //.frame(width: width, height: 24)
     }
     .buttonStyle(PlainButtonStyle())
     .popover(isPresented: $showPopover, arrowEdge: .bottom) {
@@ -506,14 +572,13 @@ struct PopoverSelector<T: Hashable & CustomStringConvertible>: View {
         }
       }
       .padding(10)
-      //.frame(minWidth: width)
     }
   }
 }
 
 struct ModelMenuView: View {
   @Binding public var modelname: String
-  private let models: [String] = OpenAIConfig.load().models.values.flatMap { $0.models }
+  private let models: [String] = OpenAIConfig.load().models.values.flatMap { $0.models }.sorted()
   var body: some View {
     PopoverSelector(
       selection: $modelname, options: models,
@@ -554,14 +619,16 @@ struct PromptMenuView: View {
     .task {
       let availablePrompts = await ChatHistory.shared.getAvailablePrompts()
       prompts = ["None"] + availablePrompts
+      if !prompts.contains(selectedPrompt) {
+        selectedPrompt = "None"
+      }
     }
   }
 }
 
 struct FileUploadButton: View {
-  @Binding var input: String
+  @Binding var selectedFileName: String?
   @State private var isFilePickerPresented = false
-  @State private var selectedFileName: String? = nil
   let onFileSelected: (URL) -> Void
 
   var body: some View {
@@ -581,12 +648,15 @@ struct FileUploadButton: View {
           .foregroundColor(.secondary)
           .lineLimit(1)
           .truncationMode(.middle)
+          .onTapGesture {
+            selectedFileName = nil
+          }
       }
     }
     .padding(.trailing, 4)
     .fileImporter(
       isPresented: $isFilePickerPresented,
-      allowedContentTypes: [.image, .pdf],
+      allowedContentTypes: [.image],
       allowsMultipleSelection: false
     ) { result in
       switch result {
@@ -594,9 +664,12 @@ struct FileUploadButton: View {
         if let file = files.first {
           selectedFileName = file.lastPathComponent
           onFileSelected(file)
+        } else {
+          selectedFileName = nil
         }
       case .failure(let error):
         print("Error selecting file: \(error.localizedDescription)")
+        selectedFileName = nil
       }
     }
   }
@@ -609,7 +682,7 @@ DispatchQueue.main.async {
   NSApplication.shared.activate(ignoringOtherApps: true)
   if let window = NSApplication.shared.windows.first {
     window.level = .floating
-    // 隐藏左上角关闭、最大化、缩小按钮
+    // Hide window buttons: close, maximize, minimize
     window.standardWindowButton(.closeButton)?.isHidden = true
     window.standardWindowButton(.miniaturizeButton)?.isHidden = true
     window.standardWindowButton(.zoomButton)?.isHidden = true
@@ -637,22 +710,20 @@ struct OpenAIConfig: Codable {
 
     do {
       let data = try Data(contentsOf: configPath)
-      return try JSONDecoder().decode(OpenAIConfig.self, from: data)
+      let decoder = JSONDecoder()
+      let config = try decoder.decode(OpenAIConfig.self, from: data)
+
+      if config.getConfig(for: config.defaultModel) == nil {
+        print("Warning: Default model '\(config.defaultModel)' not found in config. Falling back.")
+        let fallbackModel = config.models.first?.value.models.first ?? "deepseek-v3-250324"
+        print("Using fallback model: \(fallbackModel)")
+        return OpenAIConfig(models: config.models, defaultModel: fallbackModel)
+      }
+      return config
+
     } catch {
-      print("Error loading config: \(error)")
-      return OpenAIConfig(
-        models: [
-          "openai": ModelConfig(
-            baseURL: "https://ark.cn-beijing.volces.com/api/v3",
-            apiKey: "please input your api key",
-            models: ["qwen2.5", "deepseek-v3-250324"],
-            proxyEnabled: false,
-            proxyHost: "127.0.0.1",
-            proxyPort: 1088
-          )
-        ],
-        defaultModel: "deepseek-v3-250324"
-      )
+      print("Error loading config: \(error). Using default configuration.")
+      return OpenAIConfig(models: [:], defaultModel: "deepseek-v3-250324")
     }
   }
 
@@ -662,6 +733,7 @@ struct OpenAIConfig: Codable {
         return config
       }
     }
+    print("Warning: Configuration for model '\(model)' not found.")
     return nil
   }
 }
