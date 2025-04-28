@@ -107,3 +107,5 @@ ctrl + alt + shift + cmd - k	:	chat.swift
 - socks5proxy for gemini
 - set prompts folder
 - image upload and Understand
+[] support grouding web search with gemini-2.x
+[x] display/toggle thinking for reasoning model

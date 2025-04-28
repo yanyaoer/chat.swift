@@ -26,12 +26,15 @@ struct ChatMessage: Codable {
   let content: MessageContent
   let timestamp: Date
   let model: String?
+  let reasoning_effort: String?  // "low", "medium", and "high", which behind the scenes we map to 1K, 8K, and 24K thinking token budgets
 
-  init(role: String, content: MessageContent, model: String? = nil) {
+  init(role: String, content: MessageContent, model: String? = nil, reasoning_effort: String? = nil)
+  {
     self.role = role
     self.content = content
     self.timestamp = Date()
     self.model = model
+    self.reasoning_effort = reasoning_effort
   }
 }
 
@@ -76,6 +79,8 @@ struct ChatRequest: Codable {
   let model: String
   var messages: [ChatMessage]
   let stream: Bool
+  // let tools: [Tool]?
+  // let tool_choice: String?
 }
 
 struct SystemPrompt: Codable {
@@ -187,6 +192,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
     if let text = String(data: data, encoding: .utf8) {
       let lines = text.components(separatedBy: "\n")
       for line in lines {
+        // print(line)
         if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
           do {
             if line.hasPrefix("data: [DONE]") {
@@ -209,7 +215,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
               let choices = json["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               let delta = firstChoice["delta"] as? [String: Any],
-              let content = delta["content"] as? String
+              let content = (delta["reasoning_content"] as? String) ?? (delta["content"] as? String)
             {
               DispatchQueue.main.async {
                 self.currentResponse += content
@@ -363,14 +369,18 @@ struct App: SwiftUI.App {
     if !selectedPrompt.isEmpty,
       let prompt = ChatHistory.shared.loadPromptContent(name: selectedPrompt)
     {
-      messages.append(ChatMessage(role: prompt.role, content: .text(prompt.content), model: nil))
+      messages.append(ChatMessage(role: prompt.role, content: .text(prompt.content)))
     }
 
     if let imageContent = currentImageContent {
       messages.append(ChatMessage(role: "user", content: imageContent, model: modelname))
       currentImageContent = nil
     } else {
-      messages.append(ChatMessage(role: "user", content: .text(message), model: modelname))
+      let reasoning_effort = modelname.contains("gemini-2") ? "medium" : nil
+      messages.append(
+        ChatMessage(
+          role: "user", content: .text(message),
+          model: modelname, reasoning_effort: reasoning_effort))
     }
 
     print(messages)
@@ -500,7 +510,7 @@ struct ModelMenuView: View {
 struct PromptMenuView: View {
   @Binding var selectedPrompt: String
   @State private var prompts: [String] = ["None"]
-  
+
   var body: some View {
     PopoverSelector(
       selection: $selectedPrompt, options: prompts,
