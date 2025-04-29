@@ -306,6 +306,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   @Published var output: AttributedString = ""
   private var currentResponse: String = ""
   private var currentModel: String = ""
+  private var isCurrentlyReasoning: Bool = false
 
   override init() {
     super.init()
@@ -331,6 +332,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
                   ChatHistory.shared.saveMessage(assistantMessage)
                 }
                 self.currentResponse = ""
+                self.isCurrentlyReasoning = false
               }
               return
             }
@@ -341,21 +343,33 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
               let delta = firstChoice["delta"] as? [String: Any]
             {
               var contentChunk = ""
-              var isReasoning = false
+              var isChunkReasoning = false
 
               if let reasoningContent = delta["reasoning_content"] as? String {
                 contentChunk = reasoningContent
-                isReasoning = true
+                isChunkReasoning = true
               } else if let regularContent = delta["content"] as? String {
                 contentChunk = regularContent
               }
 
               if !contentChunk.isEmpty {
-                DispatchQueue.main.async { [isReasoning, contentChunk] in
-                  self.currentResponse += contentChunk
+                DispatchQueue.main.async { [contentChunk, isChunkReasoning] in
+                  var chunkToAppend = contentChunk
+                  var attributedChunk: AttributedString
 
-                  var attributedChunk = AttributedString(contentChunk)
-                  if isReasoning {
+                  if !isChunkReasoning && self.isCurrentlyReasoning {
+                    chunkToAppend = "\n" + chunkToAppend
+                    self.isCurrentlyReasoning = false
+                  }
+
+                  if isChunkReasoning {
+                    self.isCurrentlyReasoning = true
+                  }
+
+                  self.currentResponse += chunkToAppend
+
+                  attributedChunk = AttributedString(chunkToAppend)
+                  if isChunkReasoning {
                     attributedChunk.foregroundColor = .secondary
                   }
                   self.output += attributedChunk
@@ -370,6 +384,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
                   "\nError parsing stream chunk: \(error.localizedDescription)")
                 errorChunk.foregroundColor = .red
                 self.output += errorChunk
+                self.isCurrentlyReasoning = false
               }
             }
           }
@@ -385,10 +400,18 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         var errorChunk = AttributedString("\nNetwork Error: \(error.localizedDescription)")
         errorChunk.foregroundColor = .red
         self.output += errorChunk
+        self.isCurrentlyReasoning = false
       }
     } else {
-      // Successful completion is mostly handled by the [DONE] message.
-      // Resetting currentResponse is handled within the [DONE] block.
+      DispatchQueue.main.async {
+        if !self.currentResponse.isEmpty {
+          let assistantMessage = ChatMessage(
+            role: "assistant", content: .text(self.currentResponse), model: self.currentModel)
+          ChatHistory.shared.saveMessage(assistantMessage)
+          self.currentResponse = ""
+        }
+        self.isCurrentlyReasoning = false
+      }
     }
   }
 }
@@ -643,7 +666,7 @@ struct FileUploadButton: View {
       .buttonStyle(PlainButtonStyle())
       .frame(height: 10, alignment: .trailing)
       if let fileName = selectedFileName {
-        Text(fileName)
+        Text(fileName + " ✕")
           .font(.system(size: 11))
           .foregroundColor(.secondary)
           .lineLimit(1)
