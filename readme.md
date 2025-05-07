@@ -31,6 +31,11 @@ Use your own config file located at `.config/chat.swift/config.json`
             "apiKey": "",
             "models": ["gpt-4o-mini", "gpt-4o", "gpt-4.1"]
         },
+        "ollama": {
+            "baseURL": "http://127.0.0.1:11434/v1",
+            "apiKey": "sk-xxx",
+            "models": ["hf.co/unsloth/Qwen3-8B-GGUF:Q4_K_M"]
+        },
         "bailian": {
             "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "apiKey": "",
@@ -39,10 +44,9 @@ Use your own config file located at `.config/chat.swift/config.json`
         "gemini": {
             "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
             "apiKey": "",
-            "models": ["gemini-2.5-flash-preview-04-17", "gemini-2.5-pro-03-25"],
+            "models": ["gemini-2.5-flash-preview-04-17", "gemini-2.5-pro-exp-03-25"],
             "proxyEnabled": true,
-            "proxyHost": "127.0.0.1",
-            "proxyPort": 1088
+            "proxyURL": "socks5://127.0.0.1:1088"
 
         }
     },
@@ -104,8 +108,11 @@ ctrl + alt + shift + cmd - k	:	chat.swift
 - always on top of desktop
 - autoclose with last window
 - support multiple models and remember the last model
-- socks5proxy for gemini
+- socks5 and http[s] proxy for gemini
 - set prompts folder
 - image upload and Understand
 [] support grouding web search with gemini-2.x
 [x] display/toggle thinking for reasoning model
+[] ASR with sherppa-onnx or whisper.cpp
+[] multi-models stream with user input and prompt recap as wireshark
+[] mlx-lm models support from local

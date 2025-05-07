@@ -279,16 +279,35 @@ class ChatHistory {
 
     let sessionConfig = URLSessionConfiguration.default
     if let proxyEnabled = modelConfig.proxyEnabled, proxyEnabled,
-      let proxyHost = modelConfig.proxyHost,
-      let proxyPort = modelConfig.proxyPort
+      let proxyURLString = modelConfig.proxyURL, !proxyURLString.isEmpty,
+      let proxyComponents = URLComponents(string: proxyURLString),
+      let proxyHost = proxyComponents.host,
+      let proxyPort = proxyComponents.port
     {
-      sessionConfig.connectionProxyDictionary = [
-        kCFNetworkProxiesSOCKSEnable: true,
-        kCFNetworkProxiesSOCKSProxy: proxyHost,
-        kCFNetworkProxiesSOCKSPort: proxyPort,
-        kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5,
-      ]
-      // print("Using SOCKS5 proxy: \(proxyHost):\(proxyPort)")
+      let scheme = proxyComponents.scheme?.lowercased()
+      switch scheme {
+      case "socks5":
+        sessionConfig.connectionProxyDictionary = [
+          kCFNetworkProxiesSOCKSEnable: true,
+          kCFNetworkProxiesSOCKSProxy: proxyHost,
+          kCFNetworkProxiesSOCKSPort: proxyPort,
+          kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5,
+        ]
+      case "http":
+        sessionConfig.connectionProxyDictionary = [
+          kCFNetworkProxiesHTTPEnable: true,
+          kCFNetworkProxiesHTTPProxy: proxyHost,
+          kCFNetworkProxiesHTTPPort: proxyPort,
+        ]
+      case "https":
+        sessionConfig.connectionProxyDictionary = [
+          kCFNetworkProxiesHTTPSEnable: true,
+          kCFNetworkProxiesHTTPSProxy: proxyHost,
+          kCFNetworkProxiesHTTPSPort: proxyPort,
+        ]
+      default:
+        print("Unsupported proxy scheme: \(scheme ?? "nil"). Proxy not configured.")
+      }
     }
 
     streamDelegate.output = AttributedString("")
@@ -717,8 +736,8 @@ struct ModelConfig: Codable {
   let apiKey: String
   let models: [String]
   let proxyEnabled: Bool?
-  let proxyHost: String?
-  let proxyPort: Int?
+  let proxyURL: String?
+  // let proxyPort: Int?
 }
 
 struct OpenAIConfig: Codable {
