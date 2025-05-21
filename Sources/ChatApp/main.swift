@@ -228,7 +228,8 @@ class ChatHistory {
     messageContent: MessageContent? = nil,
     modelname: String,
     selectedPrompt: String,
-    streamDelegate: StreamDelegate
+    streamDelegate: StreamDelegate,
+    onQueryCompleted: @escaping () -> Void
   ) async {
     let config = OpenAIConfig.load()
     guard let modelConfig = config.getConfig(for: modelname) else {
@@ -312,10 +313,12 @@ class ChatHistory {
 
     streamDelegate.output = AttributedString("")
     streamDelegate.setModel(modelname)
+    streamDelegate.setQueryCompletionCallback(onQueryCompleted) // Set the callback
 
     let session = URLSession(
       configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
     let task = session.dataTask(with: request)
+    streamDelegate.currentTask = task // Assign the task to the streamDelegate
     task.resume()
   }
 }
@@ -326,9 +329,37 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   private var currentResponse: String = ""
   private var currentModel: String = ""
   private var isCurrentlyReasoning: Bool = false
+  var currentTask: URLSessionDataTask?
+  var currentMessageID: String?
+  var onQueryCompleted: (() -> Void)?
+
 
   override init() {
     super.init()
+  }
+
+  func cancelCurrentQuery() {
+    currentTask?.cancel()
+    DispatchQueue.main.async { // Ensure UI updates are on the main thread
+        self.output = AttributedString("")
+        self.currentResponse = ""
+        self.isCurrentlyReasoning = false
+        // self.currentTask = nil // Task becomes invalid after cancellation, good to clear
+        // self.currentMessageID = nil // Reset message ID if query is cancelled
+        // Note: isQueryActive is in App struct, will be handled by callback
+        self.onQueryCompleted?() // Also call when manually cancelling
+    }
+    // It's important to set currentTask to nil here or after ensuring it's no longer needed.
+    // Since task cancellation is async, setting it to nil immediately might be premature if other delegate methods expect it.
+    // However, for a new query, a new task will be assigned anyway.
+    // Let's set it to nil to prevent reuse of a cancelled task.
+    self.currentTask = nil
+    self.currentMessageID = nil // Also reset the message ID
+    print("Query cancelled and StreamDelegate state reset.")
+  }
+
+  func setQueryCompletionCallback(_ callback: @escaping () -> Void) {
+      self.onQueryCompleted = callback
   }
 
   func setModel(_ model: String) {
@@ -352,6 +383,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
                 }
                 self.currentResponse = ""
                 self.isCurrentlyReasoning = false
+                self.onQueryCompleted?() // Call the callback
               }
               return
             }
@@ -420,6 +452,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         errorChunk.foregroundColor = .red
         self.output += errorChunk
         self.isCurrentlyReasoning = false
+        self.onQueryCompleted?() // Call the callback
       }
     } else {
       DispatchQueue.main.async {
@@ -430,6 +463,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
           self.currentResponse = ""
         }
         self.isCurrentlyReasoning = false
+        self.onQueryCompleted?() // Call the callback
       }
     }
   }
@@ -446,6 +480,8 @@ struct App: SwiftUI.App {
   @FocusState private var focused: Bool
   @State private var selectedFileURL: URL? = nil
   @State private var selectedFileName: String? = nil
+  @State private var isQueryActive: Bool = false // Added
+  @State private var currentMessageID: String? = nil // Added
 
   var body: some Scene {
     WindowGroup {
@@ -462,7 +498,7 @@ struct App: SwiftUI.App {
         .ignoresSafeArea()
         .frame(maxWidth: .infinity, maxHeight: 0, alignment: .trailing)
 
-        LLMInputView
+        LLMInputView // Modified
         Divider()
 
         if !streamDelegate.output.characters.isEmpty {
@@ -487,25 +523,58 @@ struct App: SwiftUI.App {
     .defaultSize(width: 0.5, height: 1.0)
   }
 
-  private var LLMInputView: some View {
+  private var LLMInputView: some View { // Modified
     HStack {
-      TextField("write something..", text: $input, axis: .vertical)
-        .lineLimit(1...5)
-        .onSubmit {
-          Task {
-            await submitInput()
-          }
+        TextEditor(text: $input)
+            .frame(minHeight: 30, maxHeight: 150)
+            .border(Color.secondary.opacity(0.5), width: 0.5)
+            .cornerRadius(5)
+            .focused($focused)
+            .onSubmit {
+                if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Task {
+                        await submitInput()
+                        isQueryActive = true
+                    }
+                }
+            }
+
+        Button(action: {
+            if isQueryActive {
+                // Cancel action
+                streamDelegate.cancelCurrentQuery() 
+                input = ""
+                isQueryActive = false
+            } else {
+                // Go action
+                if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Task {
+                        await submitInput()
+                        isQueryActive = true
+                    }
+                }
+            }
+        }) {
+            Text(isQueryActive ? "cancel" : "go")
+                .padding(.horizontal, 10)
+                .frame(height: 30) 
+                .background(isQueryActive ? Color.red : Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(5)
         }
-        .textFieldStyle(.plain)
-        .focused($focused)
+        .buttonStyle(PlainButtonStyle()) 
     }
     .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
   }
 
   private func submitInput() async {
+    let newMessageID = UUID().uuidString
+    self.currentMessageID = newMessageID
+
     let textToSend = self.input
     let fileURLToSend = self.selectedFileURL
 
+    // self.input = "" // Clear input after sending? Or keep it? Let's keep it for now, cancel/new message will clear.
     self.selectedFileURL = nil
     self.selectedFileName = nil
 
@@ -515,11 +584,13 @@ struct App: SwiftUI.App {
         associatedText: textToSend
       ) {
         await ChatHistory.shared.sendMessage(
-          userText: nil,
+          userText: nil, // Or textToSend if it should be associated
           messageContent: contentToSend,
           modelname: modelname,
           selectedPrompt: selectedPrompt,
-          streamDelegate: streamDelegate
+          streamDelegate: streamDelegate,
+          messageID: newMessageID, // Added
+          onQueryCompleted: self.queryDidComplete
         )
       } else {
         print("Error processing file upload, message not sent.")
@@ -530,9 +601,17 @@ struct App: SwiftUI.App {
         messageContent: nil,
         modelname: modelname,
         selectedPrompt: selectedPrompt,
-        streamDelegate: streamDelegate
+        streamDelegate: streamDelegate,
+        messageID: newMessageID, // Added
+        onQueryCompleted: self.queryDidComplete
       )
     }
+  }
+
+  func queryDidComplete() {
+      isQueryActive = false
+      // Consider clearing input here as well, or let cancel button/new submission handle it
+      // input = "" 
   }
 
   private var LLMOutputView: some View {
