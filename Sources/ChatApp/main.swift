@@ -27,14 +27,18 @@ struct ChatMessage: Codable {
   let timestamp: Date
   let model: String?
   let reasoning_effort: String?  // "low", "medium", and "high", which behind the scenes we map to 1K, 8K, and 24K thinking token budgets
+  var id: String?
 
-  init(role: String, content: MessageContent, model: String? = nil, reasoning_effort: String? = nil)
-  {
+  init(
+    role: String, content: MessageContent, model: String? = nil, reasoning_effort: String? = nil,
+    id: String? = nil
+  ) {
     self.role = role
     self.content = content
     self.timestamp = Date()
     self.model = model
     self.reasoning_effort = reasoning_effort
+    self.id = id
   }
 }
 
@@ -79,8 +83,6 @@ struct ChatRequest: Codable {
   let model: String
   var messages: [ChatMessage]
   let stream: Bool
-  // let tools: [Tool]?
-  // let tool_choice: String?
 }
 
 struct SystemPrompt: Codable {
@@ -184,6 +186,7 @@ class ChatHistory {
 
     let modelInfo = message.model.map { " [\($0)]" } ?? ""
     let promptInfo = message.role == "system" ? " [Prompt: \(selectedPrompt)]" : ""
+    let idInfo = message.id.map { " [ID: \($0)]" } ?? ""
 
     let contentText: String
     switch message.content {
@@ -206,7 +209,7 @@ class ChatHistory {
 
     let text = """
           
-      [\(timestamp)] \(message.role)\(modelInfo)\(promptInfo):
+      [\(timestamp)] \(message.role)\(modelInfo)\(idInfo)\(promptInfo):
       \(contentText)
       """
 
@@ -228,11 +231,14 @@ class ChatHistory {
     messageContent: MessageContent? = nil,
     modelname: String,
     selectedPrompt: String,
-    streamDelegate: StreamDelegate
+    streamDelegate: StreamDelegate,
+    messageID: String,
+    onQueryCompleted: @escaping () -> Void
   ) async {
     let config = OpenAIConfig.load()
     guard let modelConfig = config.getConfig(for: modelname) else {
       print("Error: Model configuration not found for \(modelname)")
+      onQueryCompleted()
       return
     }
 
@@ -258,10 +264,12 @@ class ChatHistory {
       finalContent = .text(text)
     } else {
       print("Error: No message content to send.")
+      onQueryCompleted()
       return
     }
 
-    let userMessage = ChatMessage(role: "user", content: finalContent, model: modelname)
+    let userMessage = ChatMessage(
+      role: "user", content: finalContent, model: modelname, id: messageID)
     messagesToSend.append(userMessage)
     saveMessage(userMessage)
 
@@ -274,6 +282,7 @@ class ChatHistory {
       request.httpBody = try encoder.encode(chatRequest)
     } catch {
       print("Error encoding request: \(error)")
+      onQueryCompleted()
       return
     }
 
@@ -312,10 +321,13 @@ class ChatHistory {
 
     streamDelegate.output = AttributedString("")
     streamDelegate.setModel(modelname)
+    streamDelegate.currentMessageID = messageID
+    streamDelegate.setQueryCompletionCallback(onQueryCompleted)
 
     let session = URLSession(
       configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
     let task = session.dataTask(with: request)
+    streamDelegate.currentTask = task
     task.resume()
   }
 }
@@ -326,9 +338,29 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   private var currentResponse: String = ""
   private var currentModel: String = ""
   private var isCurrentlyReasoning: Bool = false
+  var currentTask: URLSessionDataTask?
+  var currentMessageID: String?
+  var onQueryCompleted: (() -> Void)?
 
   override init() {
     super.init()
+  }
+
+  func cancelCurrentQuery() {
+    currentTask?.cancel()
+    DispatchQueue.main.async {
+      self.output = AttributedString("")
+      self.currentResponse = ""
+      self.isCurrentlyReasoning = false
+      self.onQueryCompleted?()
+    }
+    self.currentTask = nil
+    self.currentMessageID = nil
+    print("Query cancelled and StreamDelegate state reset.")
+  }
+
+  func setQueryCompletionCallback(_ callback: @escaping () -> Void) {
+    self.onQueryCompleted = callback
   }
 
   func setModel(_ model: String) {
@@ -336,10 +368,13 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    guard currentTask == dataTask, currentMessageID != nil else {
+      return
+    }
+
     if let text = String(data: data, encoding: .utf8) {
       let lines = text.components(separatedBy: "\n")
       for line in lines {
-        // print(line)
         if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
           do {
             if line.contains("data: [DONE]") {
@@ -347,11 +382,13 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
               DispatchQueue.main.async {
                 if !finalResponse.isEmpty {
                   let assistantMessage = ChatMessage(
-                    role: "assistant", content: .text(finalResponse), model: self.currentModel)
+                    role: "assistant", content: .text(finalResponse), model: self.currentModel,
+                    id: self.currentMessageID)
                   ChatHistory.shared.saveMessage(assistantMessage)
                 }
                 self.currentResponse = ""
                 self.isCurrentlyReasoning = false
+                self.onQueryCompleted?()
               }
               return
             }
@@ -373,6 +410,8 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
 
               if !contentChunk.isEmpty {
                 DispatchQueue.main.async { [contentChunk, isChunkReasoning] in
+                  guard self.currentMessageID != nil else { return }
+
                   var chunkToAppend = contentChunk
                   var attributedChunk: AttributedString
 
@@ -399,6 +438,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
             if !line.contains("data: [DONE]") {
               print("Error parsing JSON line: \(line), Error: \(error)")
               DispatchQueue.main.async {
+                guard self.currentMessageID != nil else { return }
                 var errorChunk = AttributedString(
                   "\nError parsing stream chunk: \(error.localizedDescription)")
                 errorChunk.foregroundColor = .red
@@ -413,25 +453,43 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    guard currentTask == task || currentMessageID != nil else {
+      if error == nil || (error as NSError?)?.code == NSURLErrorCancelled {
+        print("Completion handler for an outdated/cancelled task, ignoring.")
+      } else if let error = error {
+        print("Error for an outdated task: \(error.localizedDescription)")
+      }
+      return
+    }
+
     if let error = error {
       DispatchQueue.main.async {
         self.currentResponse = ""
-        var errorChunk = AttributedString("\nNetwork Error: \(error.localizedDescription)")
-        errorChunk.foregroundColor = .red
-        self.output += errorChunk
+        if (error as NSError).code == NSURLErrorCancelled {
+          print("URLSession task explicitly cancelled.")
+        } else {
+          var errorChunk = AttributedString("\nNetwork Error: \(error.localizedDescription)")
+          errorChunk.foregroundColor = .red
+          self.output += errorChunk
+        }
         self.isCurrentlyReasoning = false
+        self.onQueryCompleted?()
       }
     } else {
       DispatchQueue.main.async {
         if !self.currentResponse.isEmpty {
           let assistantMessage = ChatMessage(
-            role: "assistant", content: .text(self.currentResponse), model: self.currentModel)
+            role: "assistant", content: .text(self.currentResponse), model: self.currentModel,
+            id: self.currentMessageID)
           ChatHistory.shared.saveMessage(assistantMessage)
-          self.currentResponse = ""
         }
+        self.currentResponse = ""
         self.isCurrentlyReasoning = false
+        self.onQueryCompleted?()
       }
     }
+    self.currentTask = nil
+    self.currentMessageID = nil
   }
 }
 
@@ -446,6 +504,8 @@ struct App: SwiftUI.App {
   @FocusState private var focused: Bool
   @State private var selectedFileURL: URL? = nil
   @State private var selectedFileName: String? = nil
+  @State private var isQueryActive: Bool = false
+  @State private var currentMessageID: String? = nil
 
   var body: some Scene {
     WindowGroup {
@@ -491,18 +551,46 @@ struct App: SwiftUI.App {
     HStack {
       TextField("write something..", text: $input, axis: .vertical)
         .lineLimit(1...5)
+        .focused($focused)
         .onSubmit {
-          Task {
-            await submitInput()
+          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Task {
+              await submitInput()
+              isQueryActive = true
+            }
           }
         }
-        .textFieldStyle(.plain)
-        .focused($focused)
+
+      Button(action: {
+        if isQueryActive {
+          streamDelegate.cancelCurrentQuery()
+          input = ""
+          isQueryActive = false
+        } else {
+          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Task {
+              await submitInput()
+              isQueryActive = true
+            }
+          }
+        }
+      }) {
+        Text(isQueryActive ? "\u{23F9}" : "\u{25B6}")
+          // .padding(.horizontal, 10)
+          // .frame(height: 30)
+          // .background(isQueryActive ? Color.red : Color.blue)
+          .foregroundColor(.white)
+          .cornerRadius(5)
+      }
+      .buttonStyle(PlainButtonStyle())
     }
     .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
   }
 
   private func submitInput() async {
+    let newMessageID = UUID().uuidString
+    self.currentMessageID = newMessageID
+
     let textToSend = self.input
     let fileURLToSend = self.selectedFileURL
 
@@ -519,10 +607,13 @@ struct App: SwiftUI.App {
           messageContent: contentToSend,
           modelname: modelname,
           selectedPrompt: selectedPrompt,
-          streamDelegate: streamDelegate
+          streamDelegate: streamDelegate,
+          messageID: newMessageID,
+          onQueryCompleted: self.queryDidComplete
         )
       } else {
         print("Error processing file upload, message not sent.")
+        self.queryDidComplete()
       }
     } else if !textToSend.isEmpty {
       await ChatHistory.shared.sendMessage(
@@ -530,9 +621,17 @@ struct App: SwiftUI.App {
         messageContent: nil,
         modelname: modelname,
         selectedPrompt: selectedPrompt,
-        streamDelegate: streamDelegate
+        streamDelegate: streamDelegate,
+        messageID: newMessageID,
+        onQueryCompleted: self.queryDidComplete
       )
+    } else {
+      self.queryDidComplete()
     }
+  }
+
+  func queryDidComplete() {
+    isQueryActive = false
   }
 
   private var LLMOutputView: some View {
@@ -627,7 +726,7 @@ struct ModelMenuView: View {
       label: {
         AnyView(
           HStack(spacing: 6) {
-            Text("🧠").font(.system(size: 14))
+            Text("\u{1F9E0}").font(.system(size: 14))
             Text(modelname).font(.system(size: 12)).foregroundColor(.primary)
           }
           .padding(.horizontal, 2)
@@ -648,7 +747,7 @@ struct PromptMenuView: View {
       label: {
         AnyView(
           HStack(spacing: 6) {
-            Text("📄").font(.system(size: 12))
+            Text("\u{1F4C4}").font(.system(size: 12))
             if selectedPrompt != "None" && !selectedPrompt.isEmpty {
               Text(selectedPrompt).font(.system(size: 12)).foregroundColor(.primary)
             }
@@ -678,7 +777,7 @@ struct FileUploadButton: View {
       Button(action: {
         isFilePickerPresented = true
       }) {
-        Text("📎")
+        Text("\u{1F4CE}")
           .font(.system(size: 12))
           .padding(.horizontal, 2)
       }
@@ -718,13 +817,10 @@ struct FileUploadButton: View {
 }
 
 DispatchQueue.main.async {
-  // hide dock icon
   NSApplication.shared.setActivationPolicy(.accessory)
-  // always on top
   NSApplication.shared.activate(ignoringOtherApps: true)
   if let window = NSApplication.shared.windows.first {
     window.level = .floating
-    // Hide window buttons: close, maximize, minimize
     window.standardWindowButton(.closeButton)?.isHidden = true
     window.standardWindowButton(.miniaturizeButton)?.isHidden = true
     window.standardWindowButton(.zoomButton)?.isHidden = true
@@ -737,7 +833,6 @@ struct ModelConfig: Codable {
   let models: [String]
   let proxyEnabled: Bool?
   let proxyURL: String?
-  // let proxyPort: Int?
 }
 
 struct OpenAIConfig: Codable {
@@ -757,7 +852,7 @@ struct OpenAIConfig: Codable {
 
       if config.getConfig(for: config.defaultModel) == nil {
         print("Warning: Default model '\(config.defaultModel)' not found in config. Falling back.")
-        let fallbackModel = config.models.first?.value.models.first ?? "deepseek-v3-250324"
+        let fallbackModel = config.models.first?.value.models.first ?? "gpt-4-turbo-preview"
         print("Using fallback model: \(fallbackModel)")
         return OpenAIConfig(models: config.models, defaultModel: fallbackModel)
       }
@@ -765,7 +860,12 @@ struct OpenAIConfig: Codable {
 
     } catch {
       print("Error loading config: \(error). Using default configuration.")
-      return OpenAIConfig(models: [:], defaultModel: "deepseek-v3-250324")
+      let defaultModels = [
+        "default": ModelConfig(
+          baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY",
+          models: ["gpt-4-turbo-preview", "gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)
+      ]
+      return OpenAIConfig(models: defaultModels, defaultModel: "gpt-4-turbo-preview")
     }
   }
 
