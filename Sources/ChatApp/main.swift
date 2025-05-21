@@ -238,7 +238,7 @@ class ChatHistory {
     let config = OpenAIConfig.load()
     guard let modelConfig = config.getConfig(for: modelname) else {
       print("Error: Model configuration not found for \(modelname)")
-      onQueryCompleted() 
+      onQueryCompleted()
       return
     }
 
@@ -264,7 +264,7 @@ class ChatHistory {
       finalContent = .text(text)
     } else {
       print("Error: No message content to send.")
-      onQueryCompleted() 
+      onQueryCompleted()
       return
     }
 
@@ -282,7 +282,7 @@ class ChatHistory {
       request.httpBody = try encoder.encode(chatRequest)
     } catch {
       print("Error encoding request: \(error)")
-      onQueryCompleted() 
+      onQueryCompleted()
       return
     }
 
@@ -321,7 +321,7 @@ class ChatHistory {
 
     streamDelegate.output = AttributedString("")
     streamDelegate.setModel(modelname)
-    streamDelegate.currentMessageID = messageID 
+    streamDelegate.currentMessageID = messageID
     streamDelegate.setQueryCompletionCallback(onQueryCompleted)
 
     let session = URLSession(
@@ -352,7 +352,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       self.output = AttributedString("")
       self.currentResponse = ""
       self.isCurrentlyReasoning = false
-      self.onQueryCompleted?() 
+      self.onQueryCompleted?()
     }
     self.currentTask = nil
     self.currentMessageID = nil
@@ -454,12 +454,12 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     guard currentTask == task || currentMessageID != nil else {
-        if error == nil || (error as NSError?)?.code == NSURLErrorCancelled {
-            print("Completion handler for an outdated/cancelled task, ignoring.")
-        } else if let error = error {
-            print("Error for an outdated task: \(error.localizedDescription)")
-        }
-        return
+      if error == nil || (error as NSError?)?.code == NSURLErrorCancelled {
+        print("Completion handler for an outdated/cancelled task, ignoring.")
+      } else if let error = error {
+        print("Error for an outdated task: \(error.localizedDescription)")
+      }
+      return
     }
 
     if let error = error {
@@ -549,10 +549,8 @@ struct App: SwiftUI.App {
 
   private var LLMInputView: some View {
     HStack {
-      TextEditor(text: $input)
-        .frame(minHeight: 30, maxHeight: 150)
-        .border(Color.secondary.opacity(0.5), width: 0.5)
-        .cornerRadius(5)
+      TextField("write something..", text: $input, axis: .vertical)
+        .lineLimit(1...5)
         .focused($focused)
         .onSubmit {
           if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -577,10 +575,10 @@ struct App: SwiftUI.App {
           }
         }
       }) {
-        Text(isQueryActive ? "cancel" : "go")
-          .padding(.horizontal, 10)
-          .frame(height: 30)
-          .background(isQueryActive ? Color.red : Color.blue)
+        Text(isQueryActive ? "\u{23F9}" : "\u{25B6}")
+          // .padding(.horizontal, 10)
+          // .frame(height: 30)
+          // .background(isQueryActive ? Color.red : Color.blue)
           .foregroundColor(.white)
           .cornerRadius(5)
       }
@@ -591,7 +589,7 @@ struct App: SwiftUI.App {
 
   private func submitInput() async {
     let newMessageID = UUID().uuidString
-    self.currentMessageID = newMessageID 
+    self.currentMessageID = newMessageID
 
     let textToSend = self.input
     let fileURLToSend = self.selectedFileURL
@@ -615,7 +613,7 @@ struct App: SwiftUI.App {
         )
       } else {
         print("Error processing file upload, message not sent.")
-        self.queryDidComplete() 
+        self.queryDidComplete()
       }
     } else if !textToSend.isEmpty {
       await ChatHistory.shared.sendMessage(
@@ -628,7 +626,7 @@ struct App: SwiftUI.App {
         onQueryCompleted: self.queryDidComplete
       )
     } else {
-        self.queryDidComplete()
+      self.queryDidComplete()
     }
   }
 
@@ -728,7 +726,7 @@ struct ModelMenuView: View {
       label: {
         AnyView(
           HStack(spacing: 6) {
-            Text("🧠").font(.system(size: 14))
+            Text("\u{1F9E0}").font(.system(size: 14))
             Text(modelname).font(.system(size: 12)).foregroundColor(.primary)
           }
           .padding(.horizontal, 2)
@@ -749,7 +747,7 @@ struct PromptMenuView: View {
       label: {
         AnyView(
           HStack(spacing: 6) {
-            Text("📄").font(.system(size: 12))
+            Text("\u{1F4C4}").font(.system(size: 12))
             if selectedPrompt != "None" && !selectedPrompt.isEmpty {
               Text(selectedPrompt).font(.system(size: 12)).foregroundColor(.primary)
             }
@@ -779,7 +777,7 @@ struct FileUploadButton: View {
       Button(action: {
         isFilePickerPresented = true
       }) {
-        Text("📎")
+        Text("\u{1F4CE}")
           .font(.system(size: 12))
           .padding(.horizontal, 2)
       }
@@ -854,7 +852,7 @@ struct OpenAIConfig: Codable {
 
       if config.getConfig(for: config.defaultModel) == nil {
         print("Warning: Default model '\(config.defaultModel)' not found in config. Falling back.")
-        let fallbackModel = config.models.first?.value.models.first ?? "gpt-4-turbo-preview" 
+        let fallbackModel = config.models.first?.value.models.first ?? "gpt-4-turbo-preview"
         print("Using fallback model: \(fallbackModel)")
         return OpenAIConfig(models: config.models, defaultModel: fallbackModel)
       }
@@ -863,7 +861,9 @@ struct OpenAIConfig: Codable {
     } catch {
       print("Error loading config: \(error). Using default configuration.")
       let defaultModels = [
-        "default": ModelConfig(baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY", models: ["gpt-4-turbo-preview", "gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)
+        "default": ModelConfig(
+          baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY",
+          models: ["gpt-4-turbo-preview", "gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)
       ]
       return OpenAIConfig(models: defaultModels, defaultModel: "gpt-4-turbo-preview")
     }
