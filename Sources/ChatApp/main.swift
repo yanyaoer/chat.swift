@@ -368,14 +368,29 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    // print(dataTask, currentMessageID)
     guard currentTask == dataTask, currentMessageID != nil else {
       return
     }
 
     if let text = String(data: data, encoding: .utf8) {
+      if let response = dataTask.response as? HTTPURLResponse,
+        response.statusCode >= 400
+      {
+        DispatchQueue.main.async {
+          var errorChunk = AttributedString("\nError: HTTP \(response.statusCode)\n\(text)")
+          errorChunk.foregroundColor = .red
+          self.output += errorChunk
+          self.isCurrentlyReasoning = false
+          self.onQueryCompleted?()
+        }
+        return
+      }
+
       let lines = text.components(separatedBy: "\n")
       for line in lines {
         if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
+          // print(line)
           do {
             if line.contains("data: [DONE]") {
               let finalResponse = currentResponse
@@ -549,22 +564,10 @@ struct App: SwiftUI.App {
 
   private var LLMInputView: some View {
     HStack {
-      TextField("write something..", text: $input, axis: .vertical)
-        .lineLimit(1...5)
-        .focused($focused)
-        .onSubmit {
-          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            Task {
-              await submitInput()
-              isQueryActive = true
-            }
-          }
-        }
-
       Button(action: {
         if isQueryActive {
           streamDelegate.cancelCurrentQuery()
-          input = ""
+          // input = ""
           isQueryActive = false
         } else {
           if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -575,14 +578,30 @@ struct App: SwiftUI.App {
           }
         }
       }) {
-        Text(isQueryActive ? "\u{23F9}" : "\u{25B6}")
-          // .padding(.horizontal, 10)
-          // .frame(height: 30)
-          // .background(isQueryActive ? Color.red : Color.blue)
+        // Text(isQueryActive ? "\u{1F9CA}" : "\u{1F3B2}")
+        Text("\u{1F3B2}")
           .foregroundColor(.white)
           .cornerRadius(5)
       }
       .buttonStyle(PlainButtonStyle())
+      .rotationEffect(isQueryActive ? .degrees(360) : .degrees(0))
+      .animation(
+        isQueryActive
+          ? Animation.linear(duration: 2.0).repeatForever(autoreverses: false) : .default,
+        value: isQueryActive)
+
+      TextField("write something..", text: $input, axis: .vertical)
+        .lineLimit(1...5)
+        .textFieldStyle(.plain)
+        .focused($focused)
+        .onSubmit {
+          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Task {
+              await submitInput()
+              isQueryActive = true
+            }
+          }
+        }
     }
     .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
   }
