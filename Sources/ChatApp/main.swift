@@ -3,6 +3,9 @@
 import AppKit
 import Foundation
 import SwiftUI
+// Ensure MCPClient is imported if any types from it are used directly in this file,
+// though most interaction is through MCPServiceManager or ToolExecutor.
+// import MCPClient
 
 class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -23,15 +26,26 @@ struct VisualEffect: NSViewRepresentable {
 
 struct ChatMessage: Codable {
   let role: String
-  let content: MessageContent
+  let content: MessageContent?
   let timestamp: Date
   let model: String?
-  let reasoning_effort: String?  // "low", "medium", and "high", which behind the scenes we map to 1K, 8K, and 24K thinking token budgets
+  let reasoning_effort: String?
   var id: String?
 
+  let tool_calls: [OpenAIToolCall]?
+  let tool_call_id: String?
+  let name: String? // Function name for role 'tool'
+
+  enum CodingKeys: String, CodingKey {
+      case role, content, timestamp, model, reasoning_effort, id
+      case tool_calls
+      case tool_call_id
+      case name
+  }
+
   init(
-    role: String, content: MessageContent, model: String? = nil, reasoning_effort: String? = nil,
-    id: String? = nil
+    role: String, content: MessageContent? = nil, model: String? = nil, reasoning_effort: String? = nil,
+    id: String? = nil, tool_calls: [OpenAIToolCall]? = nil, tool_call_id: String? = nil, name: String? = nil
   ) {
     self.role = role
     self.content = content
@@ -39,7 +53,21 @@ struct ChatMessage: Codable {
     self.model = model
     self.reasoning_effort = reasoning_effort
     self.id = id
+    self.tool_calls = tool_calls
+    self.tool_call_id = tool_call_id
+    self.name = name
   }
+}
+
+struct OpenAIToolCall: Codable {
+    let id: String
+    let type: String
+    let function: OpenAIFunctionCall
+}
+
+struct OpenAIFunctionCall: Codable {
+    let name: String
+    let arguments: String
 }
 
 enum MessageContent: Codable {
@@ -83,7 +111,32 @@ struct ChatRequest: Codable {
   let model: String
   var messages: [ChatMessage]
   let stream: Bool
+  let tools: [OpenAIToolWrapper]? // For OpenAI tool usage
+  let tool_choice: String? // For OpenAI tool usage ("auto", "none", or {"type": "function", "function": {"name": "my_function"}})
+
+
+  init(model: String, messages: [ChatMessage], stream: Bool, tools: [OpenAIToolWrapper]? = nil, tool_choice: String? = "auto") {
+      self.model = model
+      self.messages = messages
+      self.stream = stream
+      self.tools = tools
+      self.tool_choice = tool_choice
+  }
 }
+
+// Wrapper for OpenAI tool definition
+struct OpenAIToolWrapper: Codable {
+    let type: String // "function"
+    let function: OpenAIFunctionTool
+}
+struct OpenAIFunctionTool: Codable {
+    let name: String
+    let description: String
+    // let parameters: JSONSchema // Define parameters as a JSON schema object; using String for simplicity for now
+    // For simplicity, parameters are omitted here but are crucial for real tool use.
+    // Example: parameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The city and state, e.g. San Francisco, CA"}}, "required": ["location"]}
+}
+
 
 struct SystemPrompt: Codable {
   let role: String
@@ -96,6 +149,10 @@ class ChatHistory {
   private let historyPath: URL
   private let promptsPath: URL
   @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
+
+  // Store message history for ReAct loop
+  private var currentConversation: [ChatMessage] = []
+
 
   private init() {
     let configPath = FileManager.default.homeDirectoryForCurrentUser
@@ -180,40 +237,47 @@ class ChatHistory {
   }
 
   func saveMessage(_ message: ChatMessage) {
+    currentConversation.append(message) // Add to in-memory history for ReAct
+
     let dateFormatter = DateFormatter()
     dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
     let timestamp = dateFormatter.string(from: message.timestamp)
 
     let modelInfo = message.model.map { " [\($0)]" } ?? ""
-    let promptInfo = message.role == "system" ? " [Prompt: \(selectedPrompt)]" : ""
+    // let promptInfo = message.role == "system" ? " [Prompt: \(selectedPrompt)]" : "" // Prompt info already in content
     let idInfo = message.id.map { " [ID: \($0)]" } ?? ""
 
-    let contentText: String
-    switch message.content {
-    case .text(let text):
-      contentText = text
-    case .multimodal(let items):
-      contentText = items.map { item in
-        if let text = item.text {
-          return text
-        } else if let imageUrl = item.image_url {
-          let displayUrl =
-            imageUrl.url.count > 100
-            ? String(imageUrl.url.prefix(50)) + "..." + String(imageUrl.url.suffix(20))
-            : imageUrl.url
-          return "[Image: \(displayUrl)]"
+    var contentText = ""
+    if let msgContent = message.content {
+        switch msgContent {
+        case .text(let text):
+          contentText = text
+        case .multimodal(let items):
+          contentText = items.map { item in
+            if let text = item.text { return text }
+            if let imageUrl = item.image_url {
+              let displayUrl = imageUrl.url.count > 100 ? String(imageUrl.url.prefix(50)) + "..." + String(imageUrl.url.suffix(20)) : imageUrl.url
+              return "[Image: \(displayUrl)]"
+            }
+            return ""
+          }.joined(separator: "\n")
         }
-        return ""
-      }.joined(separator: "\n")
+    } else if let toolCalls = message.tool_calls {
+        contentText = "Tool Calls:\n" + toolCalls.map { tc in
+            "  ID: \(tc.id)\n  Function: \(tc.function.name)\n  Args: \(tc.function.arguments)"
+        }.joined(separator: "\n")
+    } else if message.role == "tool" {
+        contentText = "Tool Result for \(message.name ?? "unknown tool") (ID: \(message.tool_call_id ?? "unknown")): \n\(message.content?.textValue ?? "No textual result")"
     }
 
-    let text = """
+
+    let textToSave = """
           
-      [\(timestamp)] \(message.role)\(modelInfo)\(idInfo)\(promptInfo):
+      [\(timestamp)] \(message.role.uppercased())\(modelInfo)\(idInfo):
       \(contentText)
       """
 
-    if let data = text.data(using: .utf8) {
+    if let data = textToSave.data(using: .utf8) {
       if FileManager.default.fileExists(atPath: historyPath.path) {
         if let handle = try? FileHandle(forWritingTo: historyPath) {
           handle.seekToEndOfFile()
@@ -226,287 +290,559 @@ class ChatHistory {
     }
   }
 
-  func sendMessage(
+  func clearConversationHistory() {
+      currentConversation = []
+  }
+
+  func getCurrentConversation() -> [ChatMessage] {
+      return currentConversation
+  }
+
+
+  // Initial message sending
+  func sendInitialMessage(
     userText: String?,
     messageContent: MessageContent? = nil,
     modelname: String,
-    selectedPrompt: String,
+    selectedPromptName: String, // Renamed to avoid conflict with AppStorage
     streamDelegate: StreamDelegate,
-    messageID: String,
-    onQueryCompleted: @escaping () -> Void
+    messageID: String
   ) async {
-    let config = OpenAIConfig.load()
-    guard let modelConfig = config.getConfig(for: modelname) else {
-      print("Error: Model configuration not found for \(modelname)")
-      onQueryCompleted()
-      return
+    clearConversationHistory() // Start fresh for a new user query
+
+    // Prepare system prompt if selected
+    var systemMessageContent: String? = nil
+    if !selectedPromptName.isEmpty, selectedPromptName != "None", let prompt = loadPromptContent(name: selectedPromptName) {
+        systemMessageContent = prompt.content
+    }
+    // Add tools description to system prompt for OpenAI models
+    if MCPConfigLoader.shared.getServiceConfig(forName: modelname) == nil { // If it's an OpenAI model
+        let toolsDescription = ToolExecutor.shared.getAvailableToolsDescriptionForLLM()
+        if systemMessageContent != nil {
+            systemMessageContent! += "\n\nAvailable tools:\n\(toolsDescription)"
+        } else {
+            systemMessageContent = "Available tools:\n\(toolsDescription)"
+        }
     }
 
-    let url = URL(string: "\(modelConfig.baseURL)/chat/completions")!
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("Bearer \(modelConfig.apiKey)", forHTTPHeaderField: "Authorization")
-
-    var messagesToSend: [ChatMessage] = []
-
-    if !selectedPrompt.isEmpty, selectedPrompt != "None",
-      let prompt = loadPromptContent(name: selectedPrompt)
-    {
-      let systemMessage = ChatMessage(role: prompt.role, content: .text(prompt.content), model: nil)
-      messagesToSend.append(systemMessage)
+    if let sysContent = systemMessageContent {
+        let systemMessage = ChatMessage(role: "system", content: .text(sysContent), id: UUID().uuidString)
+        // saveMessage(systemMessage) // System messages are part of the request, not displayed directly
+        currentConversation.append(systemMessage) // Add to conversation context
     }
 
-    let finalContent: MessageContent
+    // Prepare user message
+    let finalUserContent: MessageContent
     if let content = messageContent {
-      finalContent = content
+      finalUserContent = content
     } else if let text = userText, !text.isEmpty {
-      finalContent = .text(text)
+      finalUserContent = .text(text)
     } else {
-      print("Error: No message content to send.")
-      onQueryCompleted()
+      print("Error: No message content to send for initial message.")
+      await streamDelegate.queryDidCompleteWithError(NSError(domain: "ChatHistory", code: 1, userInfo: [NSLocalizedDescriptionKey: "No content to send."]), forMessageId: messageID)
       return
     }
+    let userMessage = ChatMessage(role: "user", content: finalUserContent, model: modelname, id: messageID)
+    saveMessage(userMessage) // This also adds to currentConversation
 
-    let userMessage = ChatMessage(
-      role: "user", content: finalContent, model: modelname, id: messageID)
-    messagesToSend.append(userMessage)
-    saveMessage(userMessage)
+    await continueConversation(modelname: modelname, streamDelegate: streamDelegate, originalMessageID: messageID)
+  }
 
-    let chatRequest = ChatRequest(
-      model: modelname, messages: messagesToSend, stream: true
-    )
-
-    do {
-      let encoder = JSONEncoder()
-      request.httpBody = try encoder.encode(chatRequest)
-    } catch {
-      print("Error encoding request: \(error)")
-      onQueryCompleted()
-      return
-    }
-
-    let sessionConfig = URLSessionConfiguration.default
-    if let proxyEnabled = modelConfig.proxyEnabled, proxyEnabled,
-      let proxyURLString = modelConfig.proxyURL, !proxyURLString.isEmpty,
-      let proxyComponents = URLComponents(string: proxyURLString),
-      let proxyHost = proxyComponents.host,
-      let proxyPort = proxyComponents.port
-    {
-      let scheme = proxyComponents.scheme?.lowercased()
-      switch scheme {
-      case "socks5":
-        sessionConfig.connectionProxyDictionary = [
-          kCFNetworkProxiesSOCKSEnable: true,
-          kCFNetworkProxiesSOCKSProxy: proxyHost,
-          kCFNetworkProxiesSOCKSPort: proxyPort,
-          kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5,
-        ]
-      case "http":
-        sessionConfig.connectionProxyDictionary = [
-          kCFNetworkProxiesHTTPEnable: true,
-          kCFNetworkProxiesHTTPProxy: proxyHost,
-          kCFNetworkProxiesHTTPPort: proxyPort,
-        ]
-      case "https":
-        sessionConfig.connectionProxyDictionary = [
-          kCFNetworkProxiesHTTPSEnable: true,
-          kCFNetworkProxiesHTTPSProxy: proxyHost,
-          kCFNetworkProxiesHTTPSPort: proxyPort,
-        ]
-      default:
-        print("Unsupported proxy scheme: \(scheme ?? "nil"). Proxy not configured.")
+  // Function to continue conversation, potentially with tool results
+  func continueConversation(
+      modelname: String,
+      streamDelegate: StreamDelegate,
+      originalMessageID: String, // ID of the initial user message this turn is for
+      toolResults: [ChatMessage]? = nil // Results from tool execution
+  ) async {
+      if let results = toolResults {
+          results.forEach { saveMessage($0) } // Save tool results to history
       }
-    }
 
-    streamDelegate.output = AttributedString("")
-    streamDelegate.setModel(modelname)
-    streamDelegate.currentMessageID = messageID
-    streamDelegate.setQueryCompletionCallback(onQueryCompleted)
+      // Determine if it's an MCP service or OpenAI
+      if let mcpService = MCPConfigLoader.shared.getServiceConfig(forName: modelname) {
+          // MCP Service Call
+          print("Continuing conversation with MCP Service: \(mcpService.name) for originalMsgID: \(originalMessageID)")
+          // For MCP, we typically send the last user message or a summary.
+          // ReAct with MCP services might involve the MCP service itself managing history,
+          // or us sending relevant parts. For now, send the latest user message or tool result content.
+          // The `currentConversation` has the full history.
+          // Let's assume the last message in currentConversation is the one to send, or if toolResults were provided, they are key.
 
-    let session = URLSession(
-      configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
-    let task = session.dataTask(with: request)
-    streamDelegate.currentTask = task
-    task.resume()
+          // Construct MCPClient.Input based on the last message or tool results
+          var mcpContent: String = ""
+          var mcpToolResults: [MCPClient.ToolResult]? = nil
+
+          if let lastToolResult = toolResults?.last, let toolContent = lastToolResult.content?.textValue {
+              // If we just processed tool results, that's the input for the next step.
+              // This assumes the MCP LLM expects the raw tool output as content.
+              // Or, if the MCP LLM made the tool call, we need to send ToolResult objects.
+              mcpContent = "Tool result for \(lastToolResult.name ?? ""): \(toolContent)"
+              // This part needs to align with how an MCP LLM expects tool results.
+              // If the MCP LLM called tools, we'd populate mcpToolResults.
+              // For now, this example assumes we are sending the text of the result.
+          } else if let lastUserMessage = currentConversation.last(where: { $0.role == "user" }), let textContent = lastUserMessage.content?.textValue {
+              mcpContent = textContent
+          } else {
+              print("Error: No suitable content for MCP service in continueConversation.")
+              await streamDelegate.queryDidCompleteWithError(NSError(domain: "ChatHistory", code: 2, userInfo: [NSLocalizedDescriptionKey: "No content for MCP."]), forMessageId: originalMessageID)
+              return
+          }
+
+          // If the MCP service is the one that requested tools, we need to send MCPClient.ToolResult
+          // This requires knowing which tool calls the MCP service made.
+          // This part is complex and depends on how MCP SDK handles tool calls *from* an MCP LLM.
+          // For now, assuming `streamRequest` to MCP is like a user query.
+          // If `toolResults` came from `MCPClient.ToolCall`s made by this MCP service, convert them.
+          if let sdkToolResults = toolResults?.compactMap({ chatMsgToMCPToolResult($0) }) {
+              mcpToolResults = sdkToolResults
+          }
+
+
+          let mcpPayload = MCPClient.Input(
+              id: UUID().uuidString, // New ID for this step
+              role: .user, // Or .assistant if it's continuing its own thought after tool use
+              content: mcpContent, // This might be empty if only sending toolResults
+              toolResults: mcpToolResults // Send tool results if available
+          )
+
+          await streamDelegate.prepareForNewQuery(
+              modelName: modelname,
+              messageID: originalMessageID, // Still tied to the original user query's ID for UI
+              completionHandler: streamDelegate.onQueryCompleted!, // Re-use existing completion
+              toolCallHandler: streamDelegate.onToolCallsDetected! // Re-use existing tool handler
+          )
+
+          await MCPServiceManager.shared.streamRequest(
+              to: mcpService.name,
+              payload: mcpPayload,
+              onReceiveChunk: { chunk in streamDelegate.mcpStreamDidReceiveChunk(chunk) },
+              onComplete: { error in streamDelegate.mcpStreamDidComplete(error: error) }
+          )
+
+      } else {
+          // OpenAI Call
+          print("Continuing conversation with OpenAI: \(modelname) for originalMsgID: \(originalMessageID)")
+          let config = OpenAIConfig.load()
+          guard let modelConfig = config.getConfig(for: modelname) else {
+              print("Error: Model configuration not found for \(modelname)")
+              await streamDelegate.queryDidCompleteWithError(nil, forMessageId: originalMessageID)
+              return
+          }
+
+          let url = URL(string: "\(modelConfig.baseURL)/chat/completions")!
+          var request = URLRequest(url: url)
+          request.httpMethod = "POST"
+          request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+          request.setValue("Bearer \(modelConfig.apiKey)", forHTTPHeaderField: "Authorization")
+
+          // Use the current conversation history for OpenAI
+          let messagesToSend = getCurrentConversation() // Includes original user, system, and any tool messages
+
+          // Define tools for OpenAI if any are registered (excluding MCP ones for now, or make them compatible)
+          let openAITools = ToolExecutor.shared.availableTools.values
+              .filter { $0.type == .localFunction } // Example: only local functions for OpenAI
+              .map { OpenAIToolWrapper(type: "function", function: OpenAIFunctionTool(name: $0.name, description: $0.description)) }
+
+
+          let chatRequest = ChatRequest(
+              model: modelname,
+              messages: messagesToSend,
+              stream: true,
+              tools: openAITools.isEmpty ? nil : openAITools,
+              tool_choice: openAITools.isEmpty ? nil : "auto" // Let OpenAI decide if/when to use tools
+          )
+
+          do {
+              let encoder = JSONEncoder()
+              // encoder.outputFormatting = .prettyPrinted // For debugging request
+              // if let jsonData = try? encoder.encode(chatRequest), let jsonString = String(data: jsonData, encoding: .utf8) {
+              //     print("OpenAI Request Body:\n\(jsonString)")
+              // }
+              request.httpBody = try encoder.encode(chatRequest)
+          } catch {
+              print("Error encoding OpenAI request: \(error)")
+              await streamDelegate.queryDidCompleteWithError(error, forMessageId: originalMessageID)
+              return
+          }
+
+          await streamDelegate.prepareForNewQuery(
+              modelName: modelname,
+              messageID: originalMessageID,
+              completionHandler: streamDelegate.onQueryCompleted!,
+              toolCallHandler: streamDelegate.onToolCallsDetected!
+          )
+
+          let sessionConfig = URLSessionConfiguration.default
+          // Proxy config (copied from original sendMessage)
+          if let proxyEnabled = modelConfig.proxyEnabled, proxyEnabled,
+            let proxyURLString = modelConfig.proxyURL, !proxyURLString.isEmpty,
+            let proxyComponents = URLComponents(string: proxyURLString),
+            let proxyHost = proxyComponents.host,
+            let proxyPort = proxyComponents.port {
+                let scheme = proxyComponents.scheme?.lowercased()
+                switch scheme {
+                case "socks5":
+                  sessionConfig.connectionProxyDictionary = [
+                    kCFNetworkProxiesSOCKSEnable: true,
+                    kCFNetworkProxiesSOCKSProxy: proxyHost,
+                    kCFNetworkProxiesSOCKSPort: proxyPort,
+                    kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5,
+                  ]
+                case "http":
+                  sessionConfig.connectionProxyDictionary = [
+                    kCFNetworkProxiesHTTPEnable: true,
+                    kCFNetworkProxiesHTTPProxy: proxyHost,
+                    kCFNetworkProxiesHTTPPort: proxyPort,
+                  ]
+                case "https":
+                  sessionConfig.connectionProxyDictionary = [
+                    kCFNetworkProxiesHTTPSEnable: true,
+                    kCFNetworkProxiesHTTPSProxy: proxyHost,
+                    kCFNetworkProxiesHTTPSPort: proxyPort,
+                  ]
+                default:
+                  print("Unsupported proxy scheme: \(scheme ?? "nil"). Proxy not configured for ReAct OpenAI call.")
+                }
+          }
+
+          let session = URLSession(configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
+          let task = session.dataTask(with: request)
+          streamDelegate.currentTask = task
+          task.resume()
+      }
+  }
+
+  private func chatMsgToMCPToolResult(_ message: ChatMessage) -> MCPClient.ToolResult? {
+      guard message.role == "tool",
+            let toolCallId = message.tool_call_id,
+            let toolName = message.name,
+            let content = message.content?.textValue else { return nil }
+      return MCPClient.ToolResult(id: toolCallId, toolName: toolName, content: content)
   }
 }
 
-final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable
-{
+extension MessageContent {
+    var textValue: String? {
+        if case .text(let str) = self { return str }
+        // Could add logic for multimodal if needed, e.g., join text parts
+        return nil
+    }
+}
+
+
+// Helper structs for decoding OpenAI stream
+struct OpenAIStreamResponse: Decodable {
+    let choices: [OpenAIStreamChoice]
+}
+
+struct OpenAIStreamChoice: Decodable {
+    let delta: OpenAIStreamDelta
+    let index: Int
+    let finish_reason: String?
+}
+
+struct OpenAIStreamDelta: Decodable {
+    let role: String?
+    let content: String?
+    let tool_calls: [OpenAIToolCallChunk]?
+}
+
+struct OpenAIToolCallChunk: Decodable {
+    let index: Int
+    let id: String?
+    let type: String?
+    let function: OpenAIFunctionCallChunk?
+}
+
+struct OpenAIFunctionCallChunk: Decodable {
+    let name: String?
+    let arguments: String?
+}
+
+
+final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable {
   @Published var output: AttributedString = ""
-  private var currentResponse: String = ""
+  private var currentResponse: String = "" // Aggregates text content for one turn
   private var currentModel: String = ""
-  private var isCurrentlyReasoning: Bool = false
+
   var currentTask: URLSessionDataTask?
-  var currentMessageID: String?
+  var currentMessageID: String? // ID of the initial user message for the current ReAct turn
+
   var onQueryCompleted: (() -> Void)?
+  var onToolCallsDetected: (([MCPClient.ToolCall], _ messageId: String, _ modelName: String) -> Void)?
+
+  private var isMCPQuery: Bool = false
+  private var pendingOpenAIToolCallChunksByIndex: [Int: OpenAIToolCallChunk] = [:]
+
 
   override init() {
     super.init()
   }
 
-  func cancelCurrentQuery() {
-    currentTask?.cancel()
-    DispatchQueue.main.async {
+  @MainActor
+  func prepareForNewQuery(
+    modelName: String,
+    messageID: String,
+    completionHandler: @escaping () -> Void,
+    toolCallHandler: @escaping ([MCPClient.ToolCall], String, String) -> Void
+  ) {
+      // Clear UI output *only* if it's a new message ID, or if it's the same ID but not an MCP query (MCP queries might be part of a chain for the same original messageID)
+      // More simply, always clear for a new preparation, as any prior output is for a completed turn.
       self.output = AttributedString("")
       self.currentResponse = ""
-      self.isCurrentlyReasoning = false
+      self.currentModel = modelName
+      self.currentMessageID = messageID
+      self.onQueryCompleted = completionHandler
+      self.onToolCallsDetected = toolCallHandler
+      self.currentTask = nil
+      self.isMCPQuery = MCPConfigLoader.shared.getServiceConfig(forName: modelName) != nil
+      self.pendingOpenAIToolCallChunksByIndex = [:]
+      print("StreamDelegate prepared for new query. Model: \(modelName), ID: \(messageID), IsMCP: \(isMCPQuery)")
+  }
+
+  @MainActor
+  func displaySystemMessage(_ message: String, isError: Bool = false) {
+      var attributedMessage = AttributedString("\n🤖 \(message)\n")
+      if isError {
+          attributedMessage.foregroundColor = .red
+      } else {
+          attributedMessage.foregroundColor = .gray // Or .secondary
+      }
+      attributedMessage.font = .system(.caption, design: .monospaced)
+      self.output += attributedMessage
+  }
+
+
+  @MainActor
+  func queryDidCompleteWithError(_ error: Error?, forMessageId: String?) {
+      guard forMessageId == self.currentMessageID else {
+          print("StreamDelegate: queryDidCompleteWithError called for mismatched ID. Current: \(self.currentMessageID ?? "nil"), Received: \(forMessageId ?? "nil"). Ignoring.")
+          return
+      }
+
+      if let error = error {
+          var errorChunk = AttributedString("\nError: \(error.localizedDescription)")
+          errorChunk.foregroundColor = .red
+          self.output += errorChunk
+      }
+
       self.onQueryCompleted?()
+
+      if self.currentMessageID == forMessageId { // Double check for safety in async context
+          self.currentMessageID = nil
+          self.currentTask = nil
+          self.isMCPQuery = false
+          self.pendingOpenAIToolCallChunksByIndex = [:]
+          // self.currentResponse is cleared by prepareForNewQuery or after saving.
+      }
+      print("StreamDelegate: Query (\(forMessageId ?? "N/A")) processing finished.")
+  }
+
+  func cancelCurrentQuery() {
+    let messageIdToCancel = self.currentMessageID
+    print("StreamDelegate: cancelCurrentQuery called for \(messageIdToCancel ?? "N/A")")
+    if isMCPQuery {
+        print("MCP Query cancellation requested for ID: \(messageIdToCancel ?? "N/A"). (MCPServiceManager needs cancel support)")
+    } else {
+        currentTask?.cancel()
     }
-    self.currentTask = nil
-    self.currentMessageID = nil
-    print("Query cancelled and StreamDelegate state reset.")
+
+    DispatchQueue.main.async {
+        if self.currentMessageID == messageIdToCancel {
+            self.output = AttributedString("")
+            let cancelError = NSError(domain: "UserCancellation", code: NSUserCancelledError, userInfo: [NSLocalizedDescriptionKey: "Query cancelled by user."])
+            self.queryDidCompleteWithError(cancelError, forMessageId: messageIdToCancel)
+        }
+    }
   }
 
-  func setQueryCompletionCallback(_ callback: @escaping () -> Void) {
-    self.onQueryCompleted = callback
+  @MainActor
+  func mcpStreamDidReceiveChunk(_ chunk: MCPClient.OutputChunk) {
+      guard let msgID = self.currentMessageID, msgID == chunk.id, self.isMCPQuery else {
+          return
+      }
+
+      // Check for tool calls in MCP chunk (if MCPClient.OutputChunk supports this)
+      // Example: if let mcpToolCalls = chunk.toolCalls, !mcpToolCalls.isEmpty { ... }
+      // For now, assuming MCP tool calls are primarily in the final Output or handled differently.
+
+      var chunkToAppend = chunk.content
+      self.currentResponse += chunkToAppend
+
+      var attributedChunk = AttributedString(chunkToAppend)
+      self.output += attributedChunk
   }
 
-  func setModel(_ model: String) {
-    currentModel = model
+  @MainActor
+  func mcpStreamDidComplete(error: Error?) {
+      let completedMessageID = self.currentMessageID
+      guard completedMessageID != nil, self.isMCPQuery else {
+          print("StreamDelegate: MCP stream completion for an outdated query, ignoring.")
+          return
+      }
+      print("StreamDelegate: MCP Stream for ID \(completedMessageID!) completed. Error: \(error?.localizedDescription ?? "None")")
+
+      // TODO: Check for tool calls in the *final* aggregated MCPClient.Output.
+      // This would require MCPServiceManager to provide the full Output object on completion.
+      // If (let finalOutput = sdkProvidedFinalOutput), check finalOutput.toolCalls.
+
+      if error == nil {
+          if !self.currentResponse.isEmpty {
+              let assistantMessage = ChatMessage(
+                  role: "assistant",
+                  content: .text(self.currentResponse),
+                  model: self.currentModel,
+                  id: completedMessageID
+              )
+              ChatHistory.shared.saveMessage(assistantMessage)
+          }
+      }
+      self.queryDidCompleteWithError(error, forMessageId: completedMessageID)
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-    // print(dataTask, currentMessageID)
-    guard currentTask == dataTask, currentMessageID != nil else {
+    guard !isMCPQuery, currentTask == dataTask, let msgID = currentMessageID else {
       return
     }
 
-    if let text = String(data: data, encoding: .utf8) {
-      if let response = dataTask.response as? HTTPURLResponse,
-        response.statusCode >= 400
-      {
-        DispatchQueue.main.async {
-          var errorChunk = AttributedString("\nError: HTTP \(response.statusCode)\n\(text)")
-          errorChunk.foregroundColor = .red
-          self.output += errorChunk
-          self.isCurrentlyReasoning = false
-          self.onQueryCompleted?()
+    if let response = dataTask.response as? HTTPURLResponse, response.statusCode >= 400 {
+        if let errorText = String(data: data, encoding: .utf8) {
+            DispatchQueue.main.async { self.currentResponse += "\nHTTP Error \(response.statusCode): \(errorText)" }
+        } else {
+             DispatchQueue.main.async { self.currentResponse += "\nHTTP Error \(response.statusCode)" }
         }
+        // Let didCompleteWithError handle full error state.
         return
-      }
+    }
 
-      let lines = text.components(separatedBy: "\n")
-      for line in lines {
-        if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
-          // print(line)
-          do {
-            if line.contains("data: [DONE]") {
-              let finalResponse = currentResponse
-              DispatchQueue.main.async {
-                if !finalResponse.isEmpty {
-                  let assistantMessage = ChatMessage(
-                    role: "assistant", content: .text(finalResponse), model: self.currentModel,
-                    id: self.currentMessageID)
-                  ChatHistory.shared.saveMessage(assistantMessage)
-                }
-                self.currentResponse = ""
-                self.isCurrentlyReasoning = false
-                self.onQueryCompleted?()
-              }
-              return
-            }
+    let lines = String(data: data, encoding: .utf8)?.components(separatedBy: "\n") ?? []
+    for line in lines {
+      if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
+        if line.contains("data: [DONE]") {
+          processPendingOpenAIToolCalls(messageId: msgID, modelName: self.currentModel)
+          return
+        }
 
-            if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let firstChoice = choices.first,
-              let delta = firstChoice["delta"] as? [String: Any]
-            {
-              var contentChunk = ""
-              var isChunkReasoning = false
+        do {
+          let decoder = JSONDecoder()
+          let streamResponse = try decoder.decode(OpenAIStreamResponse.self, from: jsonData)
 
-              if let reasoningContent = delta["reasoning_content"] as? String {
-                contentChunk = reasoningContent
-                isChunkReasoning = true
-              } else if let regularContent = delta["content"] as? String {
-                contentChunk = regularContent
-              }
+          guard let choice = streamResponse.choices.first else { continue }
+          let delta = choice.delta
 
-              if !contentChunk.isEmpty {
-                DispatchQueue.main.async { [contentChunk, isChunkReasoning] in
-                  guard self.currentMessageID != nil else { return }
+          if let newToolCallChunks = delta.tool_calls {
+            for chunk in newToolCallChunks {
+                // Aggregate tool call chunks by their index
+                let index = chunk.index
+                var currentAggregatedChunk = self.pendingOpenAIToolCallChunksByIndex[index] ?? OpenAIToolCallChunk(index: index, id: nil, type: nil, function: nil)
 
-                  var chunkToAppend = contentChunk
-                  var attributedChunk: AttributedString
+                if let newId = chunk.id { currentAggregatedChunk.id = newId }
+                if let newType = chunk.type { currentAggregatedChunk.type = newType }
 
-                  if !isChunkReasoning && self.isCurrentlyReasoning {
-                    chunkToAppend = "\n" + chunkToAppend
-                    self.isCurrentlyReasoning = false
-                  }
+                var funcName = currentAggregatedChunk.function?.name ?? chunk.function?.name
+                var funcArgs = currentAggregatedChunk.function?.arguments ?? ""
 
-                  if isChunkReasoning {
-                    self.isCurrentlyReasoning = true
-                  }
+                if let newFuncName = chunk.function?.name, funcName == nil { funcName = newFuncName } // Take first non-nil name
+                if let newArgChunk = chunk.function?.arguments { funcArgs += newArgChunk }
 
-                  self.currentResponse += chunkToAppend
-
-                  attributedChunk = AttributedString(chunkToAppend)
-                  if isChunkReasoning {
-                    attributedChunk.foregroundColor = .secondary
-                  }
-                  self.output += attributedChunk
-                }
-              }
-            }
-          } catch {
-            if !line.contains("data: [DONE]") {
-              print("Error parsing JSON line: \(line), Error: \(error)")
-              DispatchQueue.main.async {
-                guard self.currentMessageID != nil else { return }
-                var errorChunk = AttributedString(
-                  "\nError parsing stream chunk: \(error.localizedDescription)")
-                errorChunk.foregroundColor = .red
-                self.output += errorChunk
-                self.isCurrentlyReasoning = false
-              }
+                currentAggregatedChunk.function = OpenAIFunctionCallChunk(name: funcName, arguments: funcArgs)
+                self.pendingOpenAIToolCallChunksByIndex[index] = currentAggregatedChunk
             }
           }
+
+          if let contentChunk = delta.content, !contentChunk.isEmpty {
+            DispatchQueue.main.async {
+              guard self.currentMessageID == msgID else { return }
+              self.currentResponse += contentChunk
+              self.output += AttributedString(contentChunk)
+            }
+          }
+
+          if choice.finish_reason == "tool_calls" {
+              processPendingOpenAIToolCalls(messageId: msgID, modelName: self.currentModel)
+          }
+
+        } catch {
+           print("StreamDelegate: Error parsing OpenAI JSON line: \(line), Error: \(error.localizedDescription)")
         }
       }
     }
+  }
+
+  private func processPendingOpenAIToolCalls(messageId: String, modelName: String) {
+      if !pendingOpenAIToolCallChunksByIndex.isEmpty {
+          let finalToolCalls = pendingOpenAIToolCallChunksByIndex.values.compactMap { aggregatedChunk -> MCPClient.ToolCall? in
+              guard let type = aggregatedChunk.type, type == "function",
+                    let id = aggregatedChunk.id,
+                    let function = aggregatedChunk.function,
+                    let name = function.name,
+                    let arguments = function.arguments else {
+                  print("StreamDelegate: Skipping incomplete tool call chunk after aggregation: \(aggregatedChunk)")
+                  return nil
+              }
+              // Ensure arguments are a complete JSON string, might need validation if critical
+              return MCPClient.ToolCall(id: id, toolName: name, args: arguments)
+          }.sorted(by: { $0.id < $1.id }) // Sort by ID for deterministic order if needed, though OpenAI index was key
+
+          DispatchQueue.main.async {
+              if !finalToolCalls.isEmpty {
+                  print("StreamDelegate: Processing fully formed OpenAI tool calls: \(finalToolCalls.map { $0.toolName }) for msgID: \(messageId)")
+                  // It's crucial that currentResponse is cleared if tool calls are dispatched,
+                  // as the assistant's turn was to call tools, not to say something.
+                  self.currentResponse = ""
+                  self.output = AttributedString("") // Clear UI output as well
+                  self.onToolCallsDetected?(finalToolCalls, messageId, modelName)
+              }
+              self.pendingOpenAIToolCallChunksByIndex = [:]
+          }
+      }
   }
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-    guard currentTask == task || currentMessageID != nil else {
-      if error == nil || (error as NSError?)?.code == NSURLErrorCancelled {
-        print("Completion handler for an outdated/cancelled task, ignoring.")
-      } else if let error = error {
-        print("Error for an outdated task: \(error.localizedDescription)")
-      }
+    let completedMessageID = self.currentMessageID
+    guard !isMCPQuery, (currentTask == task || completedMessageID != nil) else {
       return
     }
+    print("StreamDelegate: OpenAI URLSession for ID \(completedMessageID ?? "N/A") didComplete. Error: \(error?.localizedDescription ?? "None")")
 
-    if let error = error {
-      DispatchQueue.main.async {
-        self.currentResponse = ""
-        if (error as NSError).code == NSURLErrorCancelled {
-          print("URLSession task explicitly cancelled.")
-        } else {
-          var errorChunk = AttributedString("\nNetwork Error: \(error.localizedDescription)")
-          errorChunk.foregroundColor = .red
-          self.output += errorChunk
+    DispatchQueue.main.async {
+        // Fallback processing for tool calls if stream ended abruptly
+        if error != nil && !self.pendingOpenAIToolCallChunksByIndex.isEmpty {
+             self.processPendingOpenAIToolCalls(messageId: completedMessageID!, modelName: self.currentModel)
         }
-        self.isCurrentlyReasoning = false
-        self.onQueryCompleted?()
-      }
-    } else {
-      DispatchQueue.main.async {
-        if !self.currentResponse.isEmpty {
-          let assistantMessage = ChatMessage(
-            role: "assistant", content: .text(self.currentResponse), model: self.currentModel,
-            id: self.currentMessageID)
-          ChatHistory.shared.saveMessage(assistantMessage)
+
+        // If tool calls were processed (onToolCallsDetected was called), currentResponse should be empty.
+        // Only save a text message if there's content and no tool calls took precedence.
+        if error == nil && !self.currentResponse.isEmpty {
+            let assistantMessage = ChatMessage(
+                role: "assistant",
+                content: .text(self.currentResponse),
+                model: self.currentModel,
+                id: completedMessageID
+            )
+            ChatHistory.shared.saveMessage(assistantMessage)
         }
-        self.currentResponse = ""
-        self.isCurrentlyReasoning = false
-        self.onQueryCompleted?()
-      }
+        // If tool calls were detected and onToolCallsDetected was called,
+        // the ReAct loop continues from ChatHistory/App. onQueryCompleted here signals the end of *this specific network request*.
+        // The overall "query" from the user's perspective might still be ongoing via tool execution.
+        // The `onQueryCompleted` from `prepareForNewQuery` is for the *final* resolution of the user's turn.
+        // If tool calls were made, the `onQueryCompleted` here should perhaps not be the final one,
+        // but rather the ReAct loop itself will eventually call the original `onQueryCompleted` via `App.queryDidComplete`.
+        // This is subtle: if tools are called, `onToolCallsDetected` is the key outcome of this network op.
+        // If no tools, then `onQueryCompleted` (via `queryDidCompleteWithError`) is.
+
+        // If onToolCallsDetected was called, it means the ReAct loop is now active.
+        // queryDidCompleteWithError will call the App's onQueryCompleted, which might be premature if tools are running.
+        // This needs careful handling in the App struct.
+        // For now, let queryDidCompleteWithError always call onQueryCompleted.
+        // The App struct will need to manage its `isQueryActive` state based on whether it's waiting for text or tool results.
+
+        self.queryDidCompleteWithError(error, forMessageId: completedMessageID)
     }
-    self.currentTask = nil
-    self.currentMessageID = nil
   }
 }
+
 
 @MainActor
 struct App: SwiftUI.App {
@@ -519,8 +855,14 @@ struct App: SwiftUI.App {
   @FocusState private var focused: Bool
   @State private var selectedFileURL: URL? = nil
   @State private var selectedFileName: String? = nil
-  @State private var isQueryActive: Bool = false
-  @State private var currentMessageID: String? = nil
+  @State private var isQueryActive: Bool = false // Represents overall query activity, including ReAct loops
+  // Removed currentMessageID from App state, ChatHistory and StreamDelegate manage it per turn.
+
+  init() {
+    MCPConfigLoader.shared.loadConfig()
+    ToolExecutor.shared.registerMCPTools()
+    // print("Available tools for LLM: \(ToolExecutor.shared.getAvailableToolsDescriptionForLLM())")
+  }
 
   var body: some Scene {
     WindowGroup {
@@ -528,10 +870,7 @@ struct App: SwiftUI.App {
         HStack {
           ModelMenuView(modelname: $modelname)
           PromptMenuView(selectedPrompt: $selectedPrompt)
-
-          FileUploadButton(selectedFileName: $selectedFileName) { fileURL in
-            self.selectedFileURL = fileURL
-          }
+          FileUploadButton(selectedFileName: $selectedFileName) { fileURL in self.selectedFileURL = fileURL }
         }
         .offset(x: 0, y: 5)
         .ignoresSafeArea()
@@ -540,7 +879,7 @@ struct App: SwiftUI.App {
         LLMInputView
         Divider()
 
-        if !streamDelegate.output.characters.isEmpty {
+        if !streamDelegate.output.characters.isEmpty || isQueryActive { // Show output area if streaming or query active (e.g. thinking)
           LLMOutputView
         } else {
           Spacer(minLength: 20)
@@ -548,15 +887,11 @@ struct App: SwiftUI.App {
       }
       .background(VisualEffect().ignoresSafeArea())
       .frame(minWidth: 400, minHeight: 150, alignment: .topLeading)
-      .onReceive(
-        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification),
-        perform: { _ in
-          exit(0)
-        }
-      )
-      .onAppear {
-        focused = true
+      .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+        MCPServiceManager.shared.cleanup() // Cleanup MCP services
+        exit(0)
       }
+      .onAppear { focused = true }
     }
     .windowStyle(HiddenTitleBarWindowStyle())
     .defaultSize(width: 0.5, height: 1.0)
@@ -566,39 +901,34 @@ struct App: SwiftUI.App {
     HStack {
       Button(action: {
         if isQueryActive {
-          streamDelegate.cancelCurrentQuery()
-          // input = ""
-          isQueryActive = false
+          streamDelegate.cancelCurrentQuery() // This will eventually call queryDidComplete
+          // isQueryActive will be set to false by queryDidComplete
         } else {
-          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedFileURL != nil {
+            isQueryActive = true // Set active immediately for UI feedback
             Task {
               await submitInput()
-              isQueryActive = true
             }
           }
         }
       }) {
-        // Text(isQueryActive ? "\u{1F9CA}" : "\u{1F3B2}")
-        Text("\u{1F3B2}")
+        Text(isQueryActive ? "\u{25A0}" : "\u{1F3B2}") // Square for stop, Dice for send
           .foregroundColor(.white)
           .cornerRadius(5)
       }
       .buttonStyle(PlainButtonStyle())
-      .rotationEffect(isQueryActive ? .degrees(360) : .degrees(0))
-      .animation(
-        isQueryActive
-          ? Animation.linear(duration: 2.0).repeatForever(autoreverses: false) : .default,
-        value: isQueryActive)
+      .rotationEffect(isQueryActive && streamDelegate.currentTask != nil ? .degrees(360) : .degrees(0)) // Rotate only for network activity
+      .animation(isQueryActive && streamDelegate.currentTask != nil ? Animation.linear(duration: 2.0).repeatForever(autoreverses: false) : .default, value: isQueryActive && streamDelegate.currentTask != nil)
 
       TextField("write something..", text: $input, axis: .vertical)
         .lineLimit(1...5)
         .textFieldStyle(.plain)
         .focused($focused)
         .onSubmit {
-          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            Task {
-              await submitInput()
-              isQueryActive = true
+          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedFileURL != nil {
+            if !isQueryActive { // Prevent submit if already active, let cancel button handle it
+                isQueryActive = true
+                Task { await submitInput() }
             }
           }
         }
@@ -607,51 +937,84 @@ struct App: SwiftUI.App {
   }
 
   private func submitInput() async {
-    let newMessageID = UUID().uuidString
-    self.currentMessageID = newMessageID
+    let newMessageID = UUID().uuidString // Unique ID for this entire interaction turn
 
     let textToSend = self.input
     let fileURLToSend = self.selectedFileURL
 
+    // Clear input fields immediately after capturing values
+    self.input = ""
     self.selectedFileURL = nil
     self.selectedFileName = nil
 
+    var messageContent: MessageContent? = nil
     if let url = fileURLToSend {
-      if let contentToSend = await ChatHistory.shared.handleFileUpload(
-        fileURL: url,
-        associatedText: textToSend
-      ) {
-        await ChatHistory.shared.sendMessage(
-          userText: nil,
-          messageContent: contentToSend,
-          modelname: modelname,
-          selectedPrompt: selectedPrompt,
-          streamDelegate: streamDelegate,
-          messageID: newMessageID,
-          onQueryCompleted: self.queryDidComplete
-        )
-      } else {
-        print("Error processing file upload, message not sent.")
-        self.queryDidComplete()
+      messageContent = await ChatHistory.shared.handleFileUpload(fileURL: url, associatedText: textToSend.isEmpty ? nil : textToSend)
+      if messageContent == nil {
+          print("Error processing file upload, message not sent.")
+          queryDidComplete() // Reset UI state
+          return
       }
     } else if !textToSend.isEmpty {
-      await ChatHistory.shared.sendMessage(
-        userText: textToSend,
-        messageContent: nil,
-        modelname: modelname,
-        selectedPrompt: selectedPrompt,
-        streamDelegate: streamDelegate,
-        messageID: newMessageID,
-        onQueryCompleted: self.queryDidComplete
-      )
+        messageContent = .text(textToSend)
     } else {
-      self.queryDidComplete()
+        print("No input provided.")
+        queryDidComplete() // Reset UI state if nothing to send
+        return
+    }
+
+    // Use the new sendInitialMessage which also handles conversation history for ReAct
+    await ChatHistory.shared.sendInitialMessage(
+        userText: textToSend.isEmpty && fileURLToSend != nil ? nil : textToSend, // Pass textToSend only if it's primary or associated
+        messageContent: messageContent,
+        modelname: modelname,
+        selectedPromptName: selectedPrompt, // Pass the actual selected prompt string
+        streamDelegate: streamDelegate,
+        messageID: newMessageID
+    )
+  }
+
+  // This is the primary completion handler for a turn (text response or final error)
+  func queryDidComplete() {
+    print("App: queryDidComplete called. Setting isQueryActive to false.")
+    isQueryActive = false
+  }
+
+  // This is the handler for when StreamDelegate detects tool calls
+  func handleDetectedToolCalls(toolCalls: [MCPClient.ToolCall], messageId: String, modelName: String) {
+    print("App: handleDetectedToolCalls for msgID \(messageId). Count: \(toolCalls.count)")
+
+    let toolNames = toolCalls.map { $0.toolName }.joined(separator: ", ")
+    DispatchQueue.main.async {
+        streamDelegate.displaySystemMessage("Using tool(s): \(toolNames)...")
+    }
+
+    Task {
+        var toolResults: [ChatMessage] = []
+        for toolCall in toolCalls {
+            let mcpToolResult = await ToolExecutor.shared.executeToolCall(toolCall)
+            // Convert MCPClient.ToolResult to ChatMessage for OpenAI or further processing
+            let toolMessage = ChatMessage(
+                role: "tool",
+                content: .text(mcpToolResult.content), // OpenAI expects result in content for tool role
+                id: UUID().uuidString, // New message ID for this tool result
+                tool_call_id: mcpToolResult.id, // Link to the original tool call
+                name: mcpToolResult.toolName
+            )
+            toolResults.append(toolMessage)
+        }
+
+        // Continue the conversation with the tool results
+        // isQueryActive remains true because we are in a ReAct loop
+        await ChatHistory.shared.continueConversation(
+            modelname: modelName, // Send back to the same model that asked for tools
+            streamDelegate: streamDelegate,
+            originalMessageID: messageId, // Tie back to the original user message ID
+            toolResults: toolResults
+        )
     }
   }
 
-  func queryDidComplete() {
-    isQueryActive = false
-  }
 
   private var LLMOutputView: some View {
     ScrollView {
@@ -738,7 +1101,12 @@ struct PopoverSelector<T: Hashable & CustomStringConvertible>: View {
 
 struct ModelMenuView: View {
   @Binding public var modelname: String
-  private let models: [String] = OpenAIConfig.load().models.values.flatMap { $0.models }.sorted()
+  // TODO: Populate this with MCP services/tools as well
+  private var models: [String] { // Make it computed to refresh if config changes
+      let openAIModels = OpenAIConfig.load().models.values.flatMap { $0.models }
+      let mcpServiceNames = MCPConfigLoader.shared.getMCPServiceConfigs().map { $0.name }
+      return (openAIModels + mcpServiceNames).sorted()
+  }
   var body: some View {
     PopoverSelector(
       selection: $modelname, options: models,
@@ -810,13 +1178,15 @@ struct FileUploadButton: View {
           .truncationMode(.middle)
           .onTapGesture {
             selectedFileName = nil
+            // Also need to clear the underlying selectedFileURL in App state if this button is to fully manage it.
+            // For now, assumes App struct handles clearing selectedFileURL when selectedFileName is nilled.
           }
       }
     }
     .padding(.trailing, 4)
     .fileImporter(
       isPresented: $isFilePickerPresented,
-      allowedContentTypes: [.image],
+      allowedContentTypes: [.image, .plainText, .video, .audio], // Expanded for more tool types
       allowsMultipleSelection: false
     ) { result in
       switch result {
@@ -867,24 +1237,24 @@ struct OpenAIConfig: Codable {
     do {
       let data = try Data(contentsOf: configPath)
       let decoder = JSONDecoder()
-      let config = try decoder.decode(OpenAIConfig.self, from: data)
+      var config = try decoder.decode(OpenAIConfig.self, from: data)
 
       if config.getConfig(for: config.defaultModel) == nil {
         print("Warning: Default model '\(config.defaultModel)' not found in config. Falling back.")
-        let fallbackModel = config.models.first?.value.models.first ?? "gpt-4-turbo-preview"
-        print("Using fallback model: \(fallbackModel)")
-        return OpenAIConfig(models: config.models, defaultModel: fallbackModel)
+        if let firstModelProvider = config.models.first?.value, let firstModelName = firstModelProvider.models.first {
+            config.defaultModel = firstModelName
+             print("Using fallback model: \(firstModelName)")
+        } else {
+            print("Error: No models found in config to use as fallback. App might not function correctly.")
+            // Return a truly default config if everything fails
+            return OpenAIConfig(models: ["default": ModelConfig(baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY", models: ["gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)], defaultModel: "gpt-3.5-turbo")
+        }
       }
       return config
 
     } catch {
-      print("Error loading config: \(error). Using default configuration.")
-      let defaultModels = [
-        "default": ModelConfig(
-          baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY",
-          models: ["gpt-4-turbo-preview", "gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)
-      ]
-      return OpenAIConfig(models: defaultModels, defaultModel: "gpt-4-turbo-preview")
+      print("Error loading config: \(error). Using default minimal configuration.")
+      return OpenAIConfig(models: ["default": ModelConfig(baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY", models: ["gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)], defaultModel: "gpt-3.5-turbo")
     }
   }
 
@@ -894,7 +1264,7 @@ struct OpenAIConfig: Codable {
         return config
       }
     }
-    print("Warning: Configuration for model '\(model)' not found.")
+    // print("Warning: Configuration for model '\(model)' not found in OpenAIConfig.") // Less noisy
     return nil
   }
 }

@@ -6,12 +6,15 @@ import PackageDescription
 let package = Package(
   name: "chat.swift",
   platforms: [.macOS(.v14)],
-  // dependencies: [
-  // .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.7.1")
-  // ],
+  dependencies: [
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.7.1")
+  ],
   targets: [
     .executableTarget(
       name: "chat.swift",
+      dependencies: [
+        .product(name: "MCPClient", package: "swift-sdk")
+      ],
       path: "Sources/ChatApp"
     )
   ]
