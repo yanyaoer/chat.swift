@@ -2,7 +2,7 @@
 import Foundation
 import MCP // Updated import
 
-@MainActor
+@MainActor // Shared instance and methods are often called from main actor contexts (e.g. ChatHistory)
 class MCPServiceManager: ObservableObject {
     static let shared = MCPServiceManager()
 
@@ -68,8 +68,32 @@ class MCPServiceManager: ObservableObject {
             }
 
             print("Using command path: \(fullCommandPath) with args: \(serviceConfig.args ?? []) for service \(serviceName)")
-            // Assuming StdioTransport is correctly defined in the actual SDK
-            transport = MCP.StdioTransport(command: fullCommandPath, args: serviceConfig.args ?? [], logger: nil) // logger is optional
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: fullCommandPath)
+            process.arguments = serviceConfig.args
+
+            let stdinForProcess = Pipe() // What the process will read from (app writes to this)
+            let stdoutFromProcess = Pipe() // What the process will write to (app reads from this)
+
+            process.standardInput = stdinForProcess.fileHandleForReading
+            process.standardOutput = stdoutFromProcess.fileHandleForWriting
+            // TODO: Consider process.standardError for logging
+
+            do {
+                try process.run()
+                stdioProcesses[serviceName] = process // Manage the process
+                print("MCPServiceManager: Started stdio process for \(serviceName) (PID: \(process.processIdentifier))")
+            } catch {
+                throw AppMCPError.processError("Failed to run stdio process for \(serviceName): \(error.localizedDescription)")
+            }
+
+            // StdioTransport takes file handles for its input (reading from process stdout) and output (writing to process stdin)
+            transport = MCP.StdioTransport(
+                input: stdoutFromProcess.fileHandleForReading, // SDK reads from process's stdout
+                output: stdinForProcess.fileHandleForWriting,  // SDK writes to process's stdin
+                logger: nil // Optional logger
+            )
 
             // If the SDK requires manual Process management:
             // let process = Process()
@@ -117,12 +141,10 @@ class MCPServiceManager: ObservableObject {
     func cleanup() {
         activeClients.forEach { serviceName, client in
             Task {
-                do {
-                    try await client.disconnect()
-                    print("Disconnected from MCP service: \(serviceName)")
-                } catch {
-                    print("Error disconnecting from MCP service \(serviceName): \(error)")
-                }
+                // MCP.Client.disconnect() is async but not throwing according to SDK 0.9.0 README examples
+                await client.disconnect()
+                print("Disconnected from MCP service: \(serviceName)")
+                // No catch needed if disconnect() isn't throwing
             }
         }
         activeClients.removeAll()
@@ -138,84 +160,32 @@ class MCPServiceManager: ObservableObject {
     }
 }
 
-enum MCPError: Error, LocalizedError {
+// Custom Error type for MCP related operations within the app.
+// Removed explicit raw type 'Error' as it's not needed and conflicts with associated values.
+// Conforms to Swift.Error and LocalizedError for standard error handling.
+enum AppMCPError: Error, LocalizedError { // Renamed to AppMCPError to avoid any potential clash with SDK's MCPError if it exists as a protocol/typealias.
     case serviceNotFound(String)
     case invalidConfiguration(String)
     case connectionFailed(String)
     case requestFailed(String)
-    case sdkError(String)
+    case sdkError(String) // For wrapping errors from the MCP SDK itself
     case processError(String)
+    case argumentParsingError(String)
 
     var errorDescription: String? {
         switch self {
-        case .serviceNotFound(let msg): return "MCP Service Not Found: \(msg)"
-        case .invalidConfiguration(let msg): return "MCP Invalid Configuration: \(msg)"
-        case .connectionFailed(let msg): return "MCP Connection Failed: \(msg)"
-        case .requestFailed(let msg): return "MCP Request Failed: \(msg)"
-        case .sdkError(let msg): return "MCP SDK Error: \(msg)"
-        case .processError(let msg): return "MCP Process Error: \(msg)"
+        case .serviceNotFound(let msg): return "AppMCPError: Service Not Found - \(msg)"
+        case .invalidConfiguration(let msg): return "AppMCPError: Invalid Configuration - \(msg)"
+        case .connectionFailed(let msg): return "AppMCPError: Connection Failed - \(msg)"
+        case .requestFailed(let msg): return "AppMCPError: Request Failed - \(msg)"
+        case .sdkError(let msg): return "AppMCPError: SDK Error - \(msg)"
+        case .processError(let msg): return "AppMCPError: Process Error - \(msg)"
+        case .argumentParsingError(let msg): return "AppMCPError: Argument Parsing Error - \(msg)"
         }
     }
 }
 
-// Note: The actual MCPClient.Input, MCPClient.Output, MCPClient.OutputChunk,
-// MCPClient.Client, MCPClient.StdioTransport, MCPClient.HTTPClientTransport
-// types are provided by the `modelcontextprotocol/swift-sdk`.
-// The dummy/placeholder types that might have been here before should be removed
-// if the real SDK is correctly imported and provides these types.
-// If you see compilation errors here, ensure the SDK is correctly added to Package.swift
-// and that its public interface matches the usage here.
-// I am proceeding under the assumption that the SDK provides these types with
-// the methods and initializers used (e.g., `client.generate()`, `StdioTransport(command:args:)`).
-// Based on the SDK README:
-// `client.generate(input: Input)` returns `AsyncThrowingStream<OutputChunk, Error>`
-// `Input` can be created with `Input(id: "optional-id", content: "Hello")`
-// `OutputChunk` has a `content: String` property.
-// This seems to match the usage in `streamRequest`.
-// `client.send(input: Input)` is not explicitly in README, `generate` is for streaming.
-// If a non-streaming version is needed, it might be `await client.generate(input: input).reduce("", { $0 + $1.content })` or similar.
-// For simplicity in `sendRequest` I'll assume a hypothetical `client.send()` or adapt if only `generate` is available.
-// The README shows `StdioTransport(command: "/path/to/executable", args: ["--port", "8080"])`.
-// And `HTTPClientTransport(endpoint: URL(string: "http://localhost:8080")!, streaming: true)`.
-// These also seem to match.
-// The `MCPClient.Client()` initializer and `connect(transport:)`, `disconnect()` methods are also from README.
-
-// Adjusting `sendRequest` if only `generate` is available for responses:
-extension MCPServiceManager {
-    func sendRequestAggregated(to serviceName: String, payload: MCPClient.Input) async throws -> MCPClient.Output {
-        let client = try await getClient(for: serviceName)
-        print("Sending request to \(serviceName) with payload content: \(payload.content) (will aggregate stream)")
-
-        let responseStream = try await client.generate(input: payload)
-        var aggregatedContent = ""
-        for try await chunk in responseStream {
-            aggregatedContent += chunk.content
-        }
-
-        print("Aggregated response from \(serviceName): \(aggregatedContent)")
-        // Assuming MCPClient.Output can be constructed from a String or has a compatible initializer.
-        // If MCPClient.Output is more complex, this part needs adjustment.
-        // For now, let's assume it's like: struct Output { var content: String }
-        return MCPClient.Output(id: payload.id ?? UUID().uuidString, role: .assistant, content: aggregatedContent, toolCalls: nil) // Role and toolCalls are guesses for Output structure
-    }
-}
-
-// The SDK's `Output` struct is:
-// public struct Output: Equatable, Codable, Identifiable, Hashable {
-//    public let id: String
-//    public let role: Role
-//    public let content: String
-//    public let toolCalls: [ToolCall]?
-// }
-// And `Input` is:
-// public struct Input: Equatable, Codable, Identifiable, Hashable {
-//     public let id: String
-//     public var role: Role = .user // Default role
-//     public var content: String
-//     public var toolResults: [ToolResult]? = nil
-// }
-// This means my `sendRequestAggregated` should construct `MCPClient.Output` correctly.
-// And the `payload` for `streamRequest` and `sendRequestAggregated` should be `MCPClient.Input`.
-// The `Role` enum is `.system, .user, .assistant, .tool`.
-// `OutputChunk` is `public struct OutputChunk: Equatable, Codable, Identifiable, Hashable { public let id: String; public let content: String; ... }`
-// The dummy types I had before are no longer needed if the SDK is correctly imported.
+// The generic sendRequestAggregated method and its related comments about MCPClient.Input/Output
+// are removed as they are based on the old SDK (0.7.1-like) assumptions and not compatible
+// with MCP SDK 0.9.0's client.callTool() and specific request/result types.
+// Interaction with MCP services will primarily be through client.callTool() via ToolExecutor.

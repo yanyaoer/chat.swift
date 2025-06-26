@@ -64,6 +64,7 @@ struct RootMCPConfig: Codable {
     }
 }
 
+@MainActor // Ensuring shared instance and its methods are main-actor isolated
 class MCPConfigLoader {
     static let shared = MCPConfigLoader()
     private let configFileName = "mcp_server.json"

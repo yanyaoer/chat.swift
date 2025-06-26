@@ -37,6 +37,7 @@ struct ToolDefinition: Identifiable {
     }
 }
 
+@MainActor // Shared instance and methods primarily accessed/related to main actor operations (UI setup, callbacks)
 class ToolExecutor {
     static let shared = ToolExecutor()
     private var availableTools: [String: ToolDefinition] = [:]
@@ -169,7 +170,7 @@ class ToolExecutor {
 
                 let (contentItems, isError) = try await client.callTool(name: toolDefinition.name, arguments: argumentsDict)
 
-                if isError {
+                if isError == true { // Handle optional Bool
                     let errorContent = contentItems.compactMap { item -> String? in if case .text(let text) = item { return text } else { return nil } }.joined(separator: "\n")
                     let finalErrorMsg = "Error from MCP tool '\(toolDefinition.name)': \(errorContent.isEmpty ? "Unknown error from tool" : errorContent)"
                     print("ToolExecutor: \(finalErrorMsg)")
