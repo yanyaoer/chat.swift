@@ -1,13 +1,13 @@
 // MCPServiceManager.swift
 import Foundation
-import MCPClient // Import the SDK
+import MCP // Updated import
 
 @MainActor
 class MCPServiceManager: ObservableObject {
     static let shared = MCPServiceManager()
 
     // Dictionary to hold active MCP clients, keyed by service name
-    private var activeClients: [String: MCPClient.Client] = [:]
+    private var activeClients: [String: MCP.Client] = [:] // Updated to MCP.Client
     // Dictionary to hold tasks for running stdio processes
     private var stdioProcesses: [String: Process] = [:]
 
@@ -16,7 +16,7 @@ class MCPServiceManager: ObservableObject {
     }
 
     // Get or create a client for a given MCP service config
-    private func getClient(for serviceName: String) async throws -> MCPClient.Client {
+    private func getClient(for serviceName: String) async throws -> MCP.Client { // Updated to MCP.Client
         if let existingClient = activeClients[serviceName] {
             // TODO: Check if client is still connected/valid.
             // The SDK docs should clarify if connect() can be called multiple times
@@ -32,8 +32,9 @@ class MCPServiceManager: ObservableObject {
             throw MCPError.serviceNotFound("Configuration for service '\(serviceName)' not found.")
         }
 
-        let client = MCPClient.Client()
-        let transport: MCPClient.Transport
+        // Updated client initialization for SDK 0.9.0
+        let client = MCP.Client(name: "ChatApp", version: "1.0.0", logger: nil)
+        let transport: MCP.Transport // Updated to MCP.Transport
 
         print("Attempting to connect to MCP service: \(serviceName) using type: \(serviceConfig.type)")
 
@@ -68,7 +69,7 @@ class MCPServiceManager: ObservableObject {
 
             print("Using command path: \(fullCommandPath) with args: \(serviceConfig.args ?? []) for service \(serviceName)")
             // Assuming StdioTransport is correctly defined in the actual SDK
-            transport = MCPClient.StdioTransport(command: fullCommandPath, args: serviceConfig.args ?? [])
+            transport = MCP.StdioTransport(command: fullCommandPath, args: serviceConfig.args ?? [], logger: nil) // logger is optional
 
             // If the SDK requires manual Process management:
             // let process = Process()
@@ -92,56 +93,26 @@ class MCPServiceManager: ObservableObject {
                 headers["Authorization"] = "Bearer \(apiKey)" // Common practice
             }
             // Assuming HTTPClientTransport is correctly defined in the actual SDK
-            transport = MCPClient.HTTPClientTransport(endpoint: endpoint, headers: headers, streaming: true)
+            // For SDK 0.9.0, headers are not directly in constructor in basic example.
+            // This might require a different way to set headers or they are part of a request object.
+            // For now, assuming a simple init. If headers are needed, this needs revisiting post SDK update.
+            transport = MCP.HTTPClientTransport(endpoint: endpoint, streaming: true, logger: nil) // logger is optional
         }
 
-        try await client.connect(transport: transport)
+        // The connect method in SDK 0.9.0 returns `Initialization.Result`
+        // We can choose to ignore it if not checking capabilities immediately.
+        _ = try await client.connect(transport: transport)
         print("Successfully connected to MCP service: \(serviceName)")
         activeClients[serviceName] = client
         return client
     }
 
-    // Send a request (e.g., chat message, tool invocation) to an MCP service.
-    // The `requestPayload` should be structured according to the SDK's requirements.
-    // This version is for non-streaming responses.
-    func sendRequest(to serviceName: String, payload: MCPClient.Input) async throws -> MCPClient.Output {
-        let client = try await getClient(for: serviceName)
-        // This call depends on the actual SDK's method for sending non-streaming requests.
-        // E.g., client.send(input:), client.call(method:params:), etc.
-        // The `payload` structure must match what the SDK expects.
-        print("Sending request to \(serviceName) with payload: \(payload.content)")
-        let output: MCPClient.Output = try await client.send(input: payload) // Placeholder for actual SDK call
-        print("Received response from \(serviceName): \(output.content)")
-        return output
-    }
-
-    // Send a request and handle a streaming response.
-    func streamRequest(
-        to serviceName: String,
-        payload: MCPClient.Input,
-        onReceiveChunk: @escaping (MCPClient.OutputChunk) -> Void,
-        onComplete: @escaping (Error?) -> Void
-    ) async {
-        do {
-            let client = try await getClient(for: serviceName)
-            print("Streaming request to \(serviceName) with payload: \(payload.content)")
-            // This call depends on the actual SDK's method for streaming requests.
-            // E.g., client.generateStream(input:), client.subscribe(query:), etc.
-            // The loop structure will also depend on how the SDK exposes the async stream.
-            let responseStream = try await client.generate(input: payload) // `generate` is from SDK README
-
-            for try await chunk in responseStream {
-                // Assuming `chunk` is of the type `MCPClient.OutputChunk` or similar,
-                // and has a `content` property or method to get the data.
-                onReceiveChunk(chunk)
-            }
-            print("Streaming completed for \(serviceName).")
-            onComplete(nil)
-        } catch {
-            print("Error during streaming request to \(serviceName): \(error)")
-            onComplete(error)
-        }
-    }
+    // The generic sendRequest, streamRequest, and sendRequestAggregated methods
+    // based on the old SDK's Input/Output/OutputChunk model are no longer valid
+    // for SDK 0.9.0, which uses specific methods like `callTool`.
+    // These will be removed. `ToolExecutor` will use `client.callTool` directly.
+    // If direct "chat" with an MCP service is needed, it will be handled as a
+    // specific tool call (e.g., a tool named "chat").
 
     func cleanup() {
         activeClients.forEach { serviceName, client in
