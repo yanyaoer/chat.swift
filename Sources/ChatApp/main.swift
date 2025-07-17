@@ -193,11 +193,11 @@ struct SystemPrompt: Codable {
 }
 
 @MainActor
-class MCPManager {
+class MCPManager: ObservableObject {
   static let shared = MCPManager()
   private let configPath: URL
-  private var mcpServers: [String: MCPServer] = [:]
-  private var activeMCPServers: Set<String> = []
+  @Published private var mcpServers: [String: MCPServer] = [:]
+  @Published private var activeMCPServers: Set<String> = []
 
   private init() {
     let configDir = FileManager.default.homeDirectoryForCurrentUser
@@ -214,8 +214,20 @@ class MCPManager {
       let config = try JSONDecoder().decode(MCPConfig.self, from: data)
       mcpServers = config.mcpServers
       activeMCPServers = Set(config.mcpServers.filter { $0.value.isActive }.keys)
+      print("MCP config loaded successfully: \(mcpServers.count) servers")
     } catch {
-      print("Error loading MCP config: \(error)")
+      print("Error loading MCP config from \(configPath): \(error)")
+      // Create default empty config if file doesn't exist
+      if !FileManager.default.fileExists(atPath: configPath.path) {
+        let defaultConfig = MCPConfig(mcpServers: [:])
+        do {
+          let data = try JSONEncoder().encode(defaultConfig)
+          try data.write(to: configPath)
+          print("Created default MCP config file")
+        } catch {
+          print("Failed to create default MCP config: \(error)")
+        }
+      }
     }
   }
 
@@ -225,6 +237,10 @@ class MCPManager {
 
   func getActiveMCPServers() -> Set<String> {
     return activeMCPServers
+  }
+  
+  func reloadConfig() {
+    loadMCPConfig()
   }
 
   func setServerActive(_ serverName: String, active: Bool) {
@@ -1217,16 +1233,18 @@ struct PromptMenuView: View {
 }
 
 struct MCPMenuView: View {
-  @State private var mcpServers: [String: MCPServer] = [:]
-  @State private var activeMCPServers: Set<String> = []
+  @StateObject private var mcpManager = MCPManager.shared
   @State private var showPopover = false
 
   var body: some View {
-    Button(action: { showPopover.toggle() }) {
+    Button(action: { 
+      mcpManager.reloadConfig()
+      showPopover.toggle() 
+    }) {
       HStack(spacing: 6) {
         Text("🔧").font(.system(size: 12))
-        if !activeMCPServers.isEmpty {
-          Text("\(activeMCPServers.count)").font(.system(size: 10)).foregroundColor(.accentColor)
+        if !mcpManager.getActiveMCPServers().isEmpty {
+          Text("\(mcpManager.getActiveMCPServers().count)").font(.system(size: 10)).foregroundColor(.accentColor)
         }
       }
       .padding(.horizontal, 2)
@@ -1239,30 +1257,32 @@ struct MCPMenuView: View {
           .padding(.horizontal, 10)
           .padding(.top, 10)
 
-        ForEach(Array(mcpServers.keys.sorted()), id: \.self) { serverName in
-          let server = mcpServers[serverName]!
-          MCPServerRow(
-            serverName: serverName,
-            server: server,
-            isActive: activeMCPServers.contains(serverName),
-            onToggle: { isActive in
-              MCPManager.shared.setServerActive(serverName, active: isActive)
-              updateMCPState()
-            }
-          )
+        let servers = mcpManager.getMCPServers()
+        let activeServers = mcpManager.getActiveMCPServers()
+        
+        if servers.isEmpty {
+          Text("No MCP servers configured")
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+        } else {
+          ForEach(Array(servers.keys.sorted()), id: \.self) { serverName in
+            let server = servers[serverName]!
+            MCPServerRow(
+              serverName: serverName,
+              server: server,
+              isActive: activeServers.contains(serverName),
+              onToggle: { isActive in
+                mcpManager.setServerActive(serverName, active: isActive)
+              }
+            )
+          }
         }
       }
       .padding(.bottom, 10)
       .frame(width: 250)
     }
-    .task {
-      updateMCPState()
-    }
-  }
-
-  private func updateMCPState() {
-    mcpServers = MCPManager.shared.getMCPServers()
-    activeMCPServers = MCPManager.shared.getActiveMCPServers()
   }
 }
 
