@@ -649,6 +649,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   private var currentModel: String = ""
   private var isCurrentlyReasoning: Bool = false
   private var pendingMCPCall: String = ""
+  private var dataBuffer: String = ""  // Buffer for incomplete streaming data
   var currentTask: URLSessionDataTask?
   var currentMessageID: String?
   var onQueryCompleted: (() -> Void)?
@@ -664,6 +665,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       self.currentResponse = ""
       self.isCurrentlyReasoning = false
       self.pendingMCPCall = ""
+      self.dataBuffer = ""
       self.onQueryCompleted?()
     }
     self.currentTask = nil
@@ -784,95 +786,113 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         return
       }
 
-      let lines = text.components(separatedBy: "\n")
-      for line in lines {
-        if line.hasPrefix("data: "), let jsonData = line.dropFirst(6).data(using: .utf8) {
-          // print(line)
-          do {
-            if line.contains("data: [DONE]") {
-              let finalResponse = currentResponse
-              DispatchQueue.main.async {
-                if !finalResponse.isEmpty {
-                  let assistantMessage = ChatMessage(
-                    role: "assistant", content: .text(finalResponse), model: self.currentModel,
-                    id: self.currentMessageID)
-                  ChatHistory.shared.saveMessage(assistantMessage)
-                }
-                self.currentResponse = ""
-                self.isCurrentlyReasoning = false
-                self.pendingMCPCall = ""
-                self.onQueryCompleted?()
-              }
-              return
+      // Add new data to buffer
+      dataBuffer += text
+      
+      // Process complete lines from buffer
+      let lines = dataBuffer.components(separatedBy: "\n")
+      
+      // Keep the last line in buffer if it's incomplete (no trailing newline)
+      if !dataBuffer.hasSuffix("\n") && lines.count > 1 {
+        dataBuffer = lines.last ?? ""
+        let completeLines = Array(lines.dropLast())
+        processLines(completeLines)
+      } else {
+        dataBuffer = ""
+        processLines(lines)
+      }
+    }
+  }
+  
+  private func processLines(_ lines: [String]) {
+    for line in lines {
+      if line.hasPrefix("data: ") {
+        // Handle [DONE] marker
+        if line.contains("data: [DONE]") {
+          let finalResponse = currentResponse
+          DispatchQueue.main.async {
+            if !finalResponse.isEmpty {
+              let assistantMessage = ChatMessage(
+                role: "assistant", content: .text(finalResponse), model: self.currentModel,
+                id: self.currentMessageID)
+              ChatHistory.shared.saveMessage(assistantMessage)
+            }
+            self.currentResponse = ""
+            self.isCurrentlyReasoning = false
+            self.pendingMCPCall = ""
+            self.dataBuffer = ""
+            self.currentTask = nil
+            self.currentMessageID = nil
+            self.onQueryCompleted?()
+          }
+          return
+        }
+        
+        // Parse JSON data for actual content
+        let jsonString = String(line.dropFirst(6))
+        guard !jsonString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let jsonData = jsonString.data(using: .utf8) else {
+          continue
+        }
+        
+        do {
+          if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+            let choices = json["choices"] as? [[String: Any]],
+            let firstChoice = choices.first,
+            let delta = firstChoice["delta"] as? [String: Any]
+          {
+            var contentChunk = ""
+            var isChunkReasoning = false
+
+            if let reasoningContent = delta["reasoning_content"] as? String {
+              contentChunk = reasoningContent
+              isChunkReasoning = true
+            } else if let regularContent = delta["content"] as? String {
+              contentChunk = regularContent
             }
 
-            if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let firstChoice = choices.first,
-              let delta = firstChoice["delta"] as? [String: Any]
-            {
-              var contentChunk = ""
-              var isChunkReasoning = false
-
-              if let reasoningContent = delta["reasoning_content"] as? String {
-                contentChunk = reasoningContent
-                isChunkReasoning = true
-              } else if let regularContent = delta["content"] as? String {
-                contentChunk = regularContent
-              }
-
-              if !contentChunk.isEmpty {
-                DispatchQueue.main.async { [contentChunk, isChunkReasoning] in
-                  guard self.currentMessageID != nil else { return }
-
-                  var chunkToAppend = contentChunk
-                  var attributedChunk: AttributedString
-
-                  if !isChunkReasoning && self.isCurrentlyReasoning {
-                    chunkToAppend = "\n" + chunkToAppend
-                    self.isCurrentlyReasoning = false
-                  }
-
-                  if isChunkReasoning {
-                    self.isCurrentlyReasoning = true
-                  }
-
-                  self.currentResponse += chunkToAppend
-                  self.pendingMCPCall += chunkToAppend
-
-                  attributedChunk = AttributedString(chunkToAppend)
-                  if isChunkReasoning {
-                    attributedChunk.foregroundColor = .secondary
-                  }
-                  self.output += attributedChunk
-
-                  // Check for MCP action pattern in accumulated text
-                  Task {
-                    await self.detectAndExecuteMCPCall(self.pendingMCPCall)
-                  }
-                }
-              }
-            }
-          } catch {
-            if !line.contains("data: [DONE]") {
-              print("Error parsing JSON line: \(line), Error: \(error)")
-              DispatchQueue.main.async {
+            if !contentChunk.isEmpty {
+              DispatchQueue.main.async { [contentChunk, isChunkReasoning] in
                 guard self.currentMessageID != nil else { return }
-                var errorChunk = AttributedString(
-                  "\nError parsing stream chunk: \(error.localizedDescription)")
-                errorChunk.foregroundColor = .red
-                self.output += errorChunk
-                self.isCurrentlyReasoning = false
+
+                var chunkToAppend = contentChunk
+                var attributedChunk: AttributedString
+
+                if !isChunkReasoning && self.isCurrentlyReasoning {
+                  chunkToAppend = "\n" + chunkToAppend
+                  self.isCurrentlyReasoning = false
+                }
+
+                if isChunkReasoning {
+                  self.isCurrentlyReasoning = true
+                }
+
+                self.currentResponse += chunkToAppend
+                self.pendingMCPCall += chunkToAppend
+
+                attributedChunk = AttributedString(chunkToAppend)
+                if isChunkReasoning {
+                  attributedChunk.foregroundColor = .secondary
+                }
+                self.output += attributedChunk
+
+                // Check for MCP action pattern in accumulated text
+                Task {
+                  await self.detectAndExecuteMCPCall(self.pendingMCPCall)
+                }
               }
             }
           }
+        } catch {
+          print("Error parsing JSON line: \(jsonString), Error: \(error)")
+          // Don't show parsing errors to user for malformed chunks, just log them
         }
       }
     }
   }
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-    guard currentTask == task || currentMessageID != nil else {
+    guard currentTask == task && currentMessageID != nil else {
       if error == nil || (error as NSError?)?.code == NSURLErrorCancelled {
         print("Completion handler for an outdated/cancelled task, ignoring.")
       } else if let error = error {
@@ -893,9 +913,11 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         }
         self.isCurrentlyReasoning = false
         self.pendingMCPCall = ""
+        self.dataBuffer = ""
         self.onQueryCompleted?()
       }
     } else {
+      // Only save if not already saved in [DONE] handler
       DispatchQueue.main.async {
         if !self.currentResponse.isEmpty {
           let assistantMessage = ChatMessage(
@@ -906,6 +928,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         self.currentResponse = ""
         self.isCurrentlyReasoning = false
         self.pendingMCPCall = ""
+        self.dataBuffer = ""
         self.onQueryCompleted?()
       }
     }
