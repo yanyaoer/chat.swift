@@ -21,7 +21,7 @@ struct VisualEffect: NSViewRepresentable {
   func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
-struct ChatMessage: Codable {
+struct ChatMessage: Encodable {
   let role: String
   let content: MessageContent
   let timestamp: Date
@@ -39,6 +39,10 @@ struct ChatMessage: Codable {
     self.model = model
     self.reasoning_effort = reasoning_effort
     self.id = id
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case role, content, reasoning_effort
   }
 }
 
@@ -79,7 +83,7 @@ struct ImageURL: Codable {
   let url: String
 }
 
-struct ChatRequest: Codable {
+struct ChatRequest: Encodable {
   let model: String
   var messages: [ChatMessage]
   let stream: Bool
@@ -96,7 +100,7 @@ struct MCPServer: Codable {
   let headers: [String: String]?
 
   init(
-    command: String? = nil, args: [String]? = nil, env: [String: String]? = nil, 
+    command: String? = nil, args: [String]? = nil, env: [String: String]? = nil,
     isActive: Bool = false, type: String? = nil, description: String? = nil,
     url: String? = nil, headers: [String: String]? = nil
   ) {
@@ -109,7 +113,7 @@ struct MCPServer: Codable {
     self.url = url
     self.headers = headers
   }
-  
+
   var isRemote: Bool {
     return type == "http" || type == "sse" || url != nil
   }
@@ -267,33 +271,35 @@ class MCPManager {
       return await callLocalMCPTool(server: server, toolName: toolName, arguments: arguments)
     }
   }
-  
-  private func callRemoteMCPTool(server: MCPServer, toolName: String, arguments: [String: Any]) async -> String {
+
+  private func callRemoteMCPTool(server: MCPServer, toolName: String, arguments: [String: Any])
+    async -> String
+  {
     guard let urlString = server.url, let url = URL(string: urlString) else {
       return "Invalid server URL"
     }
-    
+
     // Create the MCP tool call request
     let requestBody: [String: Any] = [
       "method": "tools/call",
       "params": [
         "name": toolName,
-        "arguments": arguments
-      ]
+        "arguments": arguments,
+      ],
     ]
-    
+
     do {
       var request = URLRequest(url: url)
       request.httpMethod = "POST"
       request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-      
+
       // Add custom headers if provided
       if let headers = server.headers {
         for (key, value) in headers {
           request.setValue(value, forHTTPHeaderField: key)
         }
       }
-      
+
       // Add authorization header if available from GitHub token
       if let token = ProcessInfo.processInfo.environment["GITHUB_TOKEN"] {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -302,38 +308,43 @@ class MCPManager {
       } else if let token = ProcessInfo.processInfo.environment["GH_TOKEN"] {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
       }
-      
+
       request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
-      
+
       let (data, response) = try await URLSession.shared.data(for: request)
-      
+
       if let httpResponse = response as? HTTPURLResponse {
         if httpResponse.statusCode == 200 {
           if let jsonResponse = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-             let result = jsonResponse["result"] {
+            let result = jsonResponse["result"]
+          {
             if let resultData = try? JSONSerialization.data(withJSONObject: result),
-               let resultString = String(data: resultData, encoding: .utf8) {
+              let resultString = String(data: resultData, encoding: .utf8)
+            {
               return resultString
             }
             return "\(result)"
           }
           return String(data: data, encoding: .utf8) ?? "No response data"
         } else {
-          return "HTTP Error \(httpResponse.statusCode): \(String(data: data, encoding: .utf8) ?? "Unknown error")"
+          return
+            "HTTP Error \(httpResponse.statusCode): \(String(data: data, encoding: .utf8) ?? "Unknown error")"
         }
       }
-      
+
       return String(data: data, encoding: .utf8) ?? "No response"
     } catch {
       return "Failed to call remote MCP tool: \(error.localizedDescription)"
     }
   }
-  
-  private func callLocalMCPTool(server: MCPServer, toolName: String, arguments: [String: Any]) async -> String {
+
+  private func callLocalMCPTool(server: MCPServer, toolName: String, arguments: [String: Any]) async
+    -> String
+  {
     guard let command = server.command, let args = server.args else {
       return "Local server missing command or args"
     }
-    
+
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     process.arguments = [command] + args
@@ -542,13 +553,13 @@ class ChatHistory {
     if !activeMCPServers.isEmpty {
       let mcpContext = """
         Available MCP tools from active servers: \(Array(activeMCPServers).joined(separator: ", ")).
-        
+
         Use ReAct pattern for tool calling:
         1) Thought: analyze what you need to do
         2) Action: call specific MCP tool using format: Action: [server_name] tool_name(arguments)
         3) Observation: review result
         4) Continue until complete.
-        
+
         For GitHub MCP tools, available actions include repository operations, issue management, pull requests, etc.
         Note: Remote GitHub MCP servers require authentication via GITHUB_TOKEN environment variable.
         """
@@ -1252,7 +1263,7 @@ struct MCPServerRow: View {
           Text(serverName)
             .font(.system(size: 12, weight: .medium))
             .foregroundColor(.primary)
-          
+
           if server.isRemote {
             Text("🌐")
               .font(.system(size: 10))
@@ -1263,7 +1274,7 @@ struct MCPServerRow: View {
               .foregroundColor(.green)
           }
         }
-        
+
         if let description = server.description {
           Text(description)
             .font(.system(size: 10))
