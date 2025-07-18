@@ -1233,18 +1233,19 @@ struct PromptMenuView: View {
 }
 
 struct MCPMenuView: View {
-  @StateObject private var mcpManager = MCPManager.shared
+  @State private var mcpServers: [String: MCPServer] = [:]
+  @State private var activeMCPServers: Set<String> = []
   @State private var showPopover = false
 
   var body: some View {
     Button(action: { 
-      mcpManager.reloadConfig()
+      updateMCPState()
       showPopover.toggle() 
     }) {
       HStack(spacing: 6) {
         Text("🔧").font(.system(size: 12))
-        if !mcpManager.getActiveMCPServers().isEmpty {
-          Text("\(mcpManager.getActiveMCPServers().count)").font(.system(size: 10)).foregroundColor(.accentColor)
+        if !activeMCPServers.isEmpty {
+          Text("\(activeMCPServers.count)").font(.system(size: 10)).foregroundColor(.accentColor)
         }
       }
       .padding(.horizontal, 2)
@@ -1257,24 +1258,24 @@ struct MCPMenuView: View {
           .padding(.horizontal, 10)
           .padding(.top, 10)
 
-        let servers = mcpManager.getMCPServers()
-        let activeServers = mcpManager.getActiveMCPServers()
-        
-        if servers.isEmpty {
+        if mcpServers.isEmpty {
           Text("No MCP servers configured")
             .font(.caption)
             .foregroundColor(.secondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
         } else {
-          ForEach(Array(servers.keys.sorted()), id: \.self) { serverName in
-            let server = servers[serverName]!
+          ForEach(Array(mcpServers.keys.sorted()), id: \.self) { serverName in
+            let server = mcpServers[serverName]!
             MCPServerRow(
               serverName: serverName,
               server: server,
-              isActive: activeServers.contains(serverName),
+              isActive: activeMCPServers.contains(serverName),
               onToggle: { isActive in
-                mcpManager.setServerActive(serverName, active: isActive)
+                Task { @MainActor in
+                  MCPManager.shared.setServerActive(serverName, active: isActive)
+                  updateMCPState()
+                }
               }
             )
           }
@@ -1282,6 +1283,20 @@ struct MCPMenuView: View {
       }
       .padding(.bottom, 10)
       .frame(width: 250)
+    }
+    .onAppear {
+      updateMCPState()
+    }
+    .task {
+      updateMCPState()
+    }
+  }
+  
+  private func updateMCPState() {
+    Task { @MainActor in
+      MCPManager.shared.reloadConfig()
+      mcpServers = MCPManager.shared.getMCPServers()
+      activeMCPServers = MCPManager.shared.getActiveMCPServers()
     }
   }
 }
