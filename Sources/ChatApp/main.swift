@@ -153,7 +153,7 @@ struct MCPServer: Codable {
   let command: String?
   let args: [String]?
   let env: [String: String]?
-  let isActive: Bool
+  let isActive: Bool?
   let type: String?
   let description: String?
   let url: String?
@@ -161,7 +161,7 @@ struct MCPServer: Codable {
 
   init(
     command: String? = nil, args: [String]? = nil, env: [String: String]? = nil,
-    isActive: Bool = false, type: String? = nil, description: String? = nil,
+    isActive: Bool? = nil, type: String? = nil, description: String? = nil,
     url: String? = nil, headers: [String: String]? = nil
   ) {
     self.command = command
@@ -290,7 +290,7 @@ class MCPManager: ObservableObject {
     do {
       let config = try MCPConfig.loadConfig(MCPConfig.self)
       mcpServers = config.mcpServers
-      activeMCPServers = Set(config.mcpServers.filter { $0.value.isActive }.keys)
+      activeMCPServers = Set(config.mcpServers.filter { $0.value.isActive == true }.keys)
       print("MCP config loaded successfully: \(mcpServers.count) servers")
     } catch {
       print("Error loading MCP config from \(MCPConfig.configPath): \(error)")
@@ -317,7 +317,7 @@ class MCPManager: ObservableObject {
         command: server.command,
         args: server.args,
         env: server.env,
-        isActive: activeMCPServers.contains(name),
+        isActive: activeMCPServers.contains(name) ? true : nil,
         type: server.type,
         description: server.description,
         url: server.url,
