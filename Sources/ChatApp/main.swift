@@ -35,14 +35,14 @@ extension View {
       .background(Color.blue.opacity(0.1))
       .cornerRadius(6)
   }
-  
+
   func popoverContentStyle() -> some View {
     self
       .padding()
       .frame(width: 300, height: 400)
       .background(VisualEffect())
   }
-  
+
   func serverRowStyle(isSelected: Bool) -> some View {
     self
       .padding(.horizontal, 12)
@@ -56,11 +56,11 @@ extension View {
 
 enum AppError: LocalizedError {
   case configNotFound(String)
-  case configCorrupted(String) 
+  case configCorrupted(String)
   case networkError(String)
   case mcpError(String)
   case fileOperationError(String)
-  
+
   var errorDescription: String? {
     switch self {
     case .configNotFound(let path):
@@ -181,7 +181,7 @@ struct MCPServer: Codable {
 
 struct MCPConfig: Codable, ConfigLoadable {
   let mcpServers: [String: MCPServer]
-  
+
   static var configPath: URL {
     return FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".config")
@@ -265,11 +265,6 @@ extension ConfigLoadable {
     let data = try Data(contentsOf: configPath)
     return try JSONDecoder().decode(type, from: data)
   }
-  
-  static func saveConfig<T: Codable>(_ config: T) throws {
-    let data = try JSONEncoder().encode(config)
-    try data.write(to: configPath)
-  }
 }
 
 // MARK: - System Configuration
@@ -299,16 +294,6 @@ class MCPManager: ObservableObject {
       print("MCP config loaded successfully: \(mcpServers.count) servers")
     } catch {
       print("Error loading MCP config from \(MCPConfig.configPath): \(error)")
-      // Create default empty config if file doesn't exist
-      if !FileManager.default.fileExists(atPath: MCPConfig.configPath.path) {
-        let defaultConfig = MCPConfig(mcpServers: [:])
-        do {
-          try MCPConfig.saveConfig(defaultConfig)
-          print("Created default MCP config file")
-        } catch {
-          print("Failed to create default MCP config: \(error)")
-        }
-      }
     }
   }
 
@@ -319,10 +304,6 @@ class MCPManager: ObservableObject {
   func getActiveMCPServers() -> Set<String> {
     return activeMCPServers
   }
-  
-  func reloadConfig() {
-    loadMCPConfig()
-  }
 
   func setServerActive(_ serverName: String, active: Bool) {
     if active {
@@ -330,10 +311,6 @@ class MCPManager: ObservableObject {
     } else {
       activeMCPServers.remove(serverName)
     }
-    saveMCPConfig()
-  }
-
-  private func saveMCPConfig() {
     var updatedServers = mcpServers
     for (name, server) in updatedServers {
       updatedServers[name] = MCPServer(
@@ -347,13 +324,7 @@ class MCPManager: ObservableObject {
         headers: server.headers
       )
     }
-
-    let config = MCPConfig(mcpServers: updatedServers)
-    do {
-      try MCPConfig.saveConfig(config)
-    } catch {
-      print("Error saving MCP config: \(error)")
-    }
+    mcpServers = updatedServers
   }
 
   func callMCPTool(serverName: String, toolName: String, arguments: [String: Any]) async -> String {
@@ -886,10 +857,10 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
 
       // Add new data to buffer
       dataBuffer += text
-      
+
       // Process complete lines from buffer
       let lines = dataBuffer.components(separatedBy: "\n")
-      
+
       // Keep the last line in buffer if it's incomplete (no trailing newline)
       if !dataBuffer.hasSuffix("\n") && lines.count > 1 {
         dataBuffer = lines.last ?? ""
@@ -901,7 +872,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       }
     }
   }
-  
+
   private func processLines(_ lines: [String]) {
     for line in lines {
       if line.hasPrefix("data: ") {
@@ -925,14 +896,15 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
           }
           return
         }
-        
+
         // Parse JSON data for actual content
         let jsonString = String(line.dropFirst(6))
         guard !jsonString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let jsonData = jsonString.data(using: .utf8) else {
+          let jsonData = jsonString.data(using: .utf8)
+        else {
           continue
         }
-        
+
         do {
           if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
             let choices = json["choices"] as? [[String: Any]],
@@ -1325,10 +1297,16 @@ struct MCPMenuView: View {
   @State private var activeMCPServers: Set<String> = []
   @State private var showPopover = false
 
+  init() {
+    // Initialize state immediately from MCPManager
+    let manager = MCPManager.shared
+    _mcpServers = State(initialValue: manager.getMCPServers())
+    _activeMCPServers = State(initialValue: manager.getActiveMCPServers())
+  }
+
   var body: some View {
-    Button(action: { 
-      updateMCPState()
-      showPopover.toggle() 
+    Button(action: {
+      showPopover.toggle()
     }) {
       HStack(spacing: 6) {
         Text("🔧").font(.system(size: 12))
@@ -1362,7 +1340,8 @@ struct MCPMenuView: View {
               onToggle: { isActive in
                 Task { @MainActor in
                   MCPManager.shared.setServerActive(serverName, active: isActive)
-                  updateMCPState()
+                  mcpServers = MCPManager.shared.getMCPServers()
+                  activeMCPServers = MCPManager.shared.getActiveMCPServers()
                 }
               }
             )
@@ -1371,20 +1350,6 @@ struct MCPMenuView: View {
       }
       .padding(.bottom, 10)
       .frame(width: 250)
-    }
-    .onAppear {
-      updateMCPState()
-    }
-    .task {
-      updateMCPState()
-    }
-  }
-  
-  private func updateMCPState() {
-    Task { @MainActor in
-      MCPManager.shared.reloadConfig()
-      mcpServers = MCPManager.shared.getMCPServers()
-      activeMCPServers = MCPManager.shared.getActiveMCPServers()
     }
   }
 }
@@ -1550,7 +1515,7 @@ struct OpenAIConfig: Codable, ConfigLoadable {
   static func load() -> OpenAIConfig {
     do {
       let config = try loadConfig(OpenAIConfig.self)
-      
+
       if config.getConfig(for: config.defaultModel) == nil {
         print("Warning: Default model '\(config.defaultModel)' not found in config. Falling back.")
         let fallbackModel = config.models.first?.value.models.first ?? "gpt-4-turbo-preview"
