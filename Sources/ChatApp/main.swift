@@ -4,11 +4,15 @@ import AppKit
 import Foundation
 import SwiftUI
 
+// MARK: - Application Delegate
+
 class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     return true
   }
 }
+
+// MARK: - UI Utilities
 
 struct VisualEffect: NSViewRepresentable {
   func makeNSView(context: Context) -> NSVisualEffectView {
@@ -20,6 +24,60 @@ struct VisualEffect: NSViewRepresentable {
   }
   func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
+
+// MARK: - UI Style Extensions
+
+extension View {
+  func menuButtonStyle() -> some View {
+    self
+      .padding(.horizontal, 8)
+      .padding(.vertical, 4)
+      .background(Color.blue.opacity(0.1))
+      .cornerRadius(6)
+  }
+  
+  func popoverContentStyle() -> some View {
+    self
+      .padding()
+      .frame(width: 300, height: 400)
+      .background(VisualEffect())
+  }
+  
+  func serverRowStyle(isSelected: Bool) -> some View {
+    self
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
+      .background(isSelected ? Color.blue.opacity(0.2) : Color.clear)
+      .cornerRadius(8)
+  }
+}
+
+// MARK: - Error Handling
+
+enum AppError: LocalizedError {
+  case configNotFound(String)
+  case configCorrupted(String) 
+  case networkError(String)
+  case mcpError(String)
+  case fileOperationError(String)
+  
+  var errorDescription: String? {
+    switch self {
+    case .configNotFound(let path):
+      return "配置文件未找到: \(path)"
+    case .configCorrupted(let details):
+      return "配置文件格式错误: \(details)"
+    case .networkError(let message):
+      return "网络错误: \(message)"
+    case .mcpError(let message):
+      return "MCP服务错误: \(message)"
+    case .fileOperationError(let message):
+      return "文件操作错误: \(message)"
+    }
+  }
+}
+
+// MARK: - Data Models
 
 struct ChatMessage: Encodable {
   let role: String
@@ -89,6 +147,8 @@ struct ChatRequest: Encodable {
   let stream: Bool
 }
 
+// MARK: - MCP Models
+
 struct MCPServer: Codable {
   let command: String?
   let args: [String]?
@@ -119,8 +179,15 @@ struct MCPServer: Codable {
   }
 }
 
-struct MCPConfig: Codable {
+struct MCPConfig: Codable, ConfigLoadable {
   let mcpServers: [String: MCPServer]
+  
+  static var configPath: URL {
+    return FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".config")
+      .appendingPathComponent("chat.swift")
+      .appendingPathComponent("mcp_config.json")
+  }
 }
 
 struct MCPToolCall: Codable {
@@ -187,42 +254,56 @@ struct MCPToolCall: Codable {
   }
 }
 
+// MARK: - Configuration Management Protocol
+
+protocol ConfigLoadable {
+  static var configPath: URL { get }
+}
+
+extension ConfigLoadable {
+  static func loadConfig<T: Codable>(_ type: T.Type) throws -> T {
+    let data = try Data(contentsOf: configPath)
+    return try JSONDecoder().decode(type, from: data)
+  }
+  
+  static func saveConfig<T: Codable>(_ config: T) throws {
+    let data = try JSONEncoder().encode(config)
+    try data.write(to: configPath)
+  }
+}
+
+// MARK: - System Configuration
+
 struct SystemPrompt: Codable {
   let role: String
   let content: String
 }
 
+// MARK: - Business Logic Managers
+
 @MainActor
 class MCPManager: ObservableObject {
   static let shared = MCPManager()
-  private let configPath: URL
   @Published private var mcpServers: [String: MCPServer] = [:]
   @Published private var activeMCPServers: Set<String> = []
 
   private init() {
-    let configDir = FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent(".config")
-      .appendingPathComponent("chat.swift")
-
-    configPath = configDir.appendingPathComponent("mcp_config.json")
     loadMCPConfig()
   }
 
   private func loadMCPConfig() {
     do {
-      let data = try Data(contentsOf: configPath)
-      let config = try JSONDecoder().decode(MCPConfig.self, from: data)
+      let config = try MCPConfig.loadConfig(MCPConfig.self)
       mcpServers = config.mcpServers
       activeMCPServers = Set(config.mcpServers.filter { $0.value.isActive }.keys)
       print("MCP config loaded successfully: \(mcpServers.count) servers")
     } catch {
-      print("Error loading MCP config from \(configPath): \(error)")
+      print("Error loading MCP config from \(MCPConfig.configPath): \(error)")
       // Create default empty config if file doesn't exist
-      if !FileManager.default.fileExists(atPath: configPath.path) {
+      if !FileManager.default.fileExists(atPath: MCPConfig.configPath.path) {
         let defaultConfig = MCPConfig(mcpServers: [:])
         do {
-          let data = try JSONEncoder().encode(defaultConfig)
-          try data.write(to: configPath)
+          try MCPConfig.saveConfig(defaultConfig)
           print("Created default MCP config file")
         } catch {
           print("Failed to create default MCP config: \(error)")
@@ -269,8 +350,7 @@ class MCPManager: ObservableObject {
 
     let config = MCPConfig(mcpServers: updatedServers)
     do {
-      let data = try JSONEncoder().encode(config)
-      try data.write(to: configPath)
+      try MCPConfig.saveConfig(config)
     } catch {
       print("Error saving MCP config: \(error)")
     }
@@ -658,6 +738,8 @@ class ChatHistory {
   }
 }
 
+// MARK: - Network Layer
+
 final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable
 {
   @Published var output: AttributedString = ""
@@ -953,6 +1035,8 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 }
 
+// MARK: - UI Components - Main App
+
 @MainActor
 struct App: SwiftUI.App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -1112,6 +1196,8 @@ struct App: SwiftUI.App {
   }
 }
 
+// MARK: - UI Components - Reusable Components
+
 struct PopoverSelectorRow<Content: View>: View {
   let label: () -> Content
   let isSelected: Bool
@@ -1181,6 +1267,8 @@ struct PopoverSelector<T: Hashable & CustomStringConvertible>: View {
     }
   }
 }
+
+// MARK: - UI Components - Menu Views
 
 struct ModelMenuView: View {
   @Binding public var modelname: String
@@ -1374,6 +1462,8 @@ struct CheckboxToggleStyle: ToggleStyle {
   }
 }
 
+// MARK: - UI Components - Utility Views
+
 struct FileUploadButton: View {
   @Binding var selectedFileName: String?
   @State private var isFilePickerPresented = false
@@ -1423,6 +1513,8 @@ struct FileUploadButton: View {
   }
 }
 
+// MARK: - Application Setup
+
 DispatchQueue.main.async {
   NSApplication.shared.setActivationPolicy(.accessory)
   NSApplication.shared.activate(ignoringOtherApps: true)
@@ -1434,6 +1526,8 @@ DispatchQueue.main.async {
   }
 }
 
+// MARK: - Configuration Models
+
 struct ModelConfig: Codable {
   let baseURL: String
   let apiKey: String
@@ -1442,21 +1536,21 @@ struct ModelConfig: Codable {
   let proxyURL: String?
 }
 
-struct OpenAIConfig: Codable {
+struct OpenAIConfig: Codable, ConfigLoadable {
   let models: [String: ModelConfig]
   let defaultModel: String
 
-  static func load() -> OpenAIConfig {
-    let configPath = FileManager.default.homeDirectoryForCurrentUser
+  static var configPath: URL {
+    return FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".config")
       .appendingPathComponent("chat.swift")
       .appendingPathComponent("config.json")
+  }
 
+  static func load() -> OpenAIConfig {
     do {
-      let data = try Data(contentsOf: configPath)
-      let decoder = JSONDecoder()
-      let config = try decoder.decode(OpenAIConfig.self, from: data)
-
+      let config = try loadConfig(OpenAIConfig.self)
+      
       if config.getConfig(for: config.defaultModel) == nil {
         print("Warning: Default model '\(config.defaultModel)' not found in config. Falling back.")
         let fallbackModel = config.models.first?.value.models.first ?? "gpt-4-turbo-preview"
@@ -1486,5 +1580,7 @@ struct OpenAIConfig: Codable {
     return nil
   }
 }
+
+// MARK: - Application Entry Point
 
 App.main()
