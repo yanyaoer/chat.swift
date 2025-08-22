@@ -28,27 +28,17 @@ struct VisualEffect: NSViewRepresentable {
 // MARK: - UI Style Extensions
 
 extension View {
-  func menuButtonStyle() -> some View {
-    self
-      .padding(.horizontal, 8)
+  func appButtonStyle() -> some View {
+    padding(.horizontal, 8)
       .padding(.vertical, 4)
       .background(Color.blue.opacity(0.1))
       .cornerRadius(6)
   }
 
-  func popoverContentStyle() -> some View {
-    self
-      .padding()
+  func popoverStyle() -> some View {
+    padding()
       .frame(width: 300, height: 400)
       .background(VisualEffect())
-  }
-
-  func serverRowStyle(isSelected: Bool) -> some View {
-    self
-      .padding(.horizontal, 12)
-      .padding(.vertical, 8)
-      .background(isSelected ? Color.blue.opacity(0.2) : Color.clear)
-      .cornerRadius(8)
   }
 }
 
@@ -190,71 +180,7 @@ struct MCPConfig: Codable, ConfigLoadable {
   }
 }
 
-struct MCPToolCall: Codable {
-  let name: String
-  let arguments: [String: Any]
-
-  init(name: String, arguments: [String: Any]) {
-    self.name = name
-    self.arguments = arguments
-  }
-
-  func encode(to encoder: Encoder) throws {
-    var container = encoder.container(keyedBy: CodingKeys.self)
-    try container.encode(name, forKey: .name)
-
-    var argsContainer = container.nestedContainer(
-      keyedBy: DynamicCodingKeys.self, forKey: .arguments)
-    for (key, value) in arguments {
-      let codingKey = DynamicCodingKeys(stringValue: key)!
-      if let stringValue = value as? String {
-        try argsContainer.encode(stringValue, forKey: codingKey)
-      } else if let intValue = value as? Int {
-        try argsContainer.encode(intValue, forKey: codingKey)
-      } else if let boolValue = value as? Bool {
-        try argsContainer.encode(boolValue, forKey: codingKey)
-      }
-    }
-  }
-
-  init(from decoder: Decoder) throws {
-    let container = try decoder.container(keyedBy: CodingKeys.self)
-    name = try container.decode(String.self, forKey: .name)
-
-    let argsContainer = try container.nestedContainer(
-      keyedBy: DynamicCodingKeys.self, forKey: .arguments)
-    var args: [String: Any] = [:]
-    for key in argsContainer.allKeys {
-      if let stringValue = try? argsContainer.decode(String.self, forKey: key) {
-        args[key.stringValue] = stringValue
-      } else if let intValue = try? argsContainer.decode(Int.self, forKey: key) {
-        args[key.stringValue] = intValue
-      } else if let boolValue = try? argsContainer.decode(Bool.self, forKey: key) {
-        args[key.stringValue] = boolValue
-      }
-    }
-    arguments = args
-  }
-
-  private enum CodingKeys: String, CodingKey {
-    case name, arguments
-  }
-
-  private struct DynamicCodingKeys: CodingKey {
-    var stringValue: String
-    var intValue: Int?
-
-    init?(stringValue: String) {
-      self.stringValue = stringValue
-    }
-
-    init?(intValue: Int) {
-      return nil
-    }
-  }
-}
-
-// MARK: - Configuration Management Protocol
+// MARK: - Configuration Helper
 
 protocol ConfigLoadable {
   static var configPath: URL { get }
@@ -264,6 +190,91 @@ extension ConfigLoadable {
   static func loadConfig<T: Codable>(_ type: T.Type) throws -> T {
     let data = try Data(contentsOf: configPath)
     return try JSONDecoder().decode(type, from: data)
+  }
+}
+
+extension OpenAIConfig {
+  static let safeDefaultModel = "gpt-4-turbo-preview"
+  
+  static func getDefaultModel() -> String {
+    do {
+      let config = try loadConfig(OpenAIConfig.self)
+      return config.defaultModel
+    } catch {
+      print("Warning: Could not load config for default model, using safe fallback")
+      return safeDefaultModel
+    }
+  }
+}
+
+struct ToolCall {
+  let toolName: String
+  let parameters: [String: String]
+  let isComplete: Bool
+}
+
+// MARK: - Simplified Tool Parser
+extension String {
+  func extractToolCalls() -> [ToolCall] {
+    var calls: [ToolCall] = []
+    var startIndex = startIndex
+    
+    while let range = self[startIndex...].range(of: "<tool_use>") {
+      let toolStart = range.upperBound
+      if let endRange = self[toolStart...].range(of: "</tool_use>") {
+        let toolContent = String(self[toolStart..<endRange.lowerBound])
+        if let call = toolContent.parseToolCall(isComplete: true) {
+          calls.append(call)
+        }
+        startIndex = endRange.upperBound
+      } else {
+        // Incomplete tool call
+        let toolContent = String(self[toolStart...])
+        if let call = toolContent.parseToolCall(isComplete: false) {
+          calls.append(call)
+        }
+        break
+      }
+    }
+    return calls
+  }
+  
+  private func parseToolCall(isComplete: Bool) -> ToolCall? {
+    // Extract tool name (first XML tag)
+    guard let nameMatch = range(of: #"<(\w+)>"#, options: .regularExpression),
+          let toolName = String(self[nameMatch]).extractBetween("<", ">") else { return nil }
+    
+    // Extract parameters within tool content
+    var parameters: [String: String] = [:]
+    
+    // Find content within the tool tag first
+    if let toolContentRange = range(of: #"<\#(toolName)>(.*?)</\#(toolName)>"#, options: .regularExpression) {
+      let toolContent = String(self[toolContentRange])
+        .replacingOccurrences(of: "<\(toolName)>", with: "")
+        .replacingOccurrences(of: "</\(toolName)>", with: "")
+      
+      // Parse individual parameters
+      let paramPattern = #"<(\w+)>(.*?)</\1>"#
+      let regex = try? NSRegularExpression(pattern: paramPattern, options: [.dotMatchesLineSeparators])
+      
+      regex?.enumerateMatches(in: toolContent, range: NSRange(toolContent.startIndex..<toolContent.endIndex, in: toolContent)) { match, _, _ in
+        guard let match = match, match.numberOfRanges >= 3,
+              let nameRange = Range(match.range(at: 1), in: toolContent),
+              let valueRange = Range(match.range(at: 2), in: toolContent) else { return }
+        
+        let name = String(toolContent[nameRange])
+        let value = String(toolContent[valueRange])
+        parameters[name] = value
+      }
+    }
+    
+    return ToolCall(toolName: toolName, parameters: parameters, isComplete: isComplete)
+  }
+  
+  private func extractBetween(_ start: String, _ end: String) -> String? {
+    guard let startRange = range(of: start),
+          let endRange = self[startRange.upperBound...].range(of: end) else { return nil }
+    return String(self[startRange.upperBound..<endRange.lowerBound])
   }
 }
 
@@ -594,17 +605,19 @@ class ChatHistory {
     onQueryCompleted: @escaping () -> Void
   ) async {
     let config = OpenAIConfig.load()
-    guard let modelConfig = config.getConfig(for: modelname) else {
-      print("Error: Model configuration not found for \(modelname)")
+    guard let modelConfig = config.getConfig(for: modelname),
+          let baseURL = modelConfig.baseURL,
+          let apiKey = modelConfig.apiKey else {
+      print("Error: Model configuration not found or incomplete for \(modelname)")
       onQueryCompleted()
       return
     }
 
-    let url = URL(string: "\(modelConfig.baseURL)/chat/completions")!
+    let url = URL(string: "\(baseURL)/chat/completions")!
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("Bearer \(modelConfig.apiKey)", forHTTPHeaderField: "Authorization")
+    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
     var messagesToSend: [ChatMessage] = []
 
@@ -619,15 +632,24 @@ class ChatHistory {
     let activeMCPServers = MCPManager.shared.getActiveMCPServers()
     if !activeMCPServers.isEmpty {
       let mcpContext = """
-        Available MCP tools from active servers: \(Array(activeMCPServers).joined(separator: ", ")).
+        Available MCP servers: \(Array(activeMCPServers).joined(separator: ", ")).
 
-        Use ReAct pattern for tool calling:
-        1) Thought: analyze what you need to do
-        2) Action: call specific MCP tool using format: Action: [server_name] tool_name(arguments)
-        3) Observation: review result
-        4) Continue until complete.
+        To use MCP tools, use this XML format:
+        <tool_use>
+        <mcp_call>
+        <server>server_name</server>
+        <tool>tool_name</tool>
+        <param1>value1</param1>
+        <param2>value2</param2>
+        </mcp_call>
+        </tool_use>
 
-        For GitHub MCP tools, available actions include repository operations, issue management, pull requests, etc.
+        For GitHub MCP servers, example tools include:
+        - create_issue: Create a new issue
+        - list_issues: List repository issues  
+        - create_pull_request: Create a pull request
+        - search_repositories: Search for repositories
+
         Note: Remote GitHub MCP servers require authentication via GITHUB_TOKEN environment variable.
         """
       let mcpSystemMessage = ChatMessage(role: "system", content: .text(mcpContext), model: nil)
@@ -751,88 +773,54 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   private func detectAndExecuteMCPCall(_ text: String) async {
-    // Simple pattern matching for MCP tool calls
-    // Looking for patterns like "Action: [server_name] tool_name(arguments)"
-    let mcpActionPattern = #"Action:\s*\[([^\]]+)\]\s*(\w+)\s*\(([^)]*)\)"#
-    let regex = try? NSRegularExpression(pattern: mcpActionPattern, options: [])
-
-    if let match = regex?.firstMatch(
-      in: text, options: [], range: NSRange(location: 0, length: text.utf16.count))
-    {
-      let serverName = String(text[Range(match.range(at: 1), in: text)!])
-      let toolName = String(text[Range(match.range(at: 2), in: text)!])
-      let argumentsString = String(text[Range(match.range(at: 3), in: text)!])
-
-      // Parse arguments (simple key=value format)
-      var arguments: [String: Any] = [:]
-      let argPairs = argumentsString.split(separator: ",")
-      for pair in argPairs {
-        let keyValue = pair.split(separator: "=", maxSplits: 1)
-        if keyValue.count == 2 {
-          let key = String(keyValue[0]).trimmingCharacters(in: .whitespacesAndNewlines)
-          let value = String(keyValue[1]).trimmingCharacters(in: .whitespacesAndNewlines)
-          arguments[key] = value
-        }
-      }
-
-      // Prepare display info
-      let argsString =
-        !arguments.isEmpty
-        ? arguments.map { "\($0.key) = \($0.value)" }.joined(separator: "\n") : ""
-
-      DispatchQueue.main.async {
-        var actionHeader = AttributedString("\n🔧 执行 MCP 工具\n")
-        actionHeader.foregroundColor = .blue
-
-        var actionDetails = AttributedString("服务器: \(serverName)\n工具: \(toolName)\n")
-        actionDetails.foregroundColor = .blue
-
-        if !argsString.isEmpty {
-          actionDetails += AttributedString("参数:\n\(argsString)\n")
-        }
-        actionDetails += AttributedString("执行中...\n")
-
-        self.output += actionHeader + actionDetails
-      }
-
-      let result = await MCPManager.shared.callMCPTool(
-        serverName: serverName,
-        toolName: toolName,
-        arguments: arguments
-      )
-
-      DispatchQueue.main.async {
-        // Format the result to preserve line breaks and improve readability
-        var formattedResult =
-          result
-          .replacingOccurrences(of: "\\n", with: "\n")
-          .replacingOccurrences(of: "\\t", with: "\t")
-          .replacingOccurrences(of: "\\\"", with: "\"")
-
-        // Try to pretty-print JSON if the result looks like JSON
-        if formattedResult.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{")
-          || formattedResult.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("[")
-        {
-          if let data = formattedResult.data(using: .utf8),
-            let jsonObject = try? JSONSerialization.jsonObject(with: data),
-            let prettyData = try? JSONSerialization.data(
-              withJSONObject: jsonObject, options: [.prettyPrinted, .sortedKeys]),
-            let prettyString = String(data: prettyData, encoding: .utf8)
-          {
-            formattedResult = prettyString
-          }
-        }
-
-        var resultHeader = AttributedString("\n📋 观察结果:\n")
-        resultHeader.foregroundColor = .green
-
-        var contentChunk = AttributedString("```\n\(formattedResult)\n```\n\n")
-        contentChunk.foregroundColor = .primary
-
-        self.output += resultHeader + contentChunk
-        self.currentResponse += "\n观察结果:\n```\n\(formattedResult)\n```\n\n"
-      }
+    let toolCalls = text.extractToolCalls()
+    for call in toolCalls where call.isComplete && call.toolName == "mcp_call" {
+      await executeMCPTool(call)
     }
+  }
+  
+  private func executeMCPTool(_ call: ToolCall) async {
+    guard let server = call.parameters["server"],
+          let tool = call.parameters["tool"] else { return }
+    
+    let args = call.parameters.filter { !["server", "tool"].contains($0.key) }
+    let argsDisplay = args.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
+    
+    await updateUI("🔧 执行 MCP 工具", "服务器: \(server)\n工具: \(tool)\n\(argsDisplay.isEmpty ? "" : "参数:\n\(argsDisplay)\n")执行中...")
+    
+    let result = await MCPManager.shared.callMCPTool(serverName: server, toolName: tool, arguments: args)
+    let formatted = formatResult(result)
+    
+    await updateUI("📋 工具结果", "```\n\(formatted)\n```")
+  }
+  
+  @MainActor private func updateUI(_ header: String, _ content: String) {
+    var headerAttr = AttributedString("\n\(header)\n")
+    headerAttr.foregroundColor = header.contains("工具结果") ? .green : .blue
+    
+    var contentAttr = AttributedString(content + "\n")
+    contentAttr.foregroundColor = .primary
+    
+    output += headerAttr + contentAttr
+    if header.contains("工具结果") {
+      currentResponse += "\n\(header):\n\(content)\n"
+    }
+  }
+  
+  private func formatResult(_ result: String) -> String {
+    var formatted = result
+      .replacingOccurrences(of: "\\n", with: "\n")
+      .replacingOccurrences(of: "\\\"", with: "\"")
+    
+    // Pretty print JSON if possible
+    if formatted.hasPrefix("{") || formatted.hasPrefix("["),
+       let data = formatted.data(using: .utf8),
+       let json = try? JSONSerialization.jsonObject(with: data),
+       let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]),
+       let prettyString = String(data: pretty, encoding: .utf8) {
+      formatted = prettyString
+    }
+    return formatted
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -1015,7 +1003,7 @@ struct App: SwiftUI.App {
 
   @State private var input = ""
   @StateObject private var streamDelegate = StreamDelegate()
-  @AppStorage("modelname") public var modelname = OpenAIConfig.load().defaultModel
+  @AppStorage("modelname") public var modelname = OpenAIConfig.getDefaultModel()
   @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
   @FocusState private var focused: Bool
   @State private var selectedFileURL: URL? = nil
@@ -1170,72 +1158,43 @@ struct App: SwiftUI.App {
 
 // MARK: - UI Components - Reusable Components
 
-struct PopoverSelectorRow<Content: View>: View {
-  let label: () -> Content
-  let isSelected: Bool
-  let onTap: () -> Void
-  @State private var isHovering = false
-  var body: some View {
-    Button(action: onTap) {
-      label()
-        .padding(.vertical, 6)
-        .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-          Group {
-            if isSelected {
-              Color.accentColor.opacity(0.18)
-            } else if isHovering {
-              Color.primary.opacity(0.07)
-            } else {
-              Color.clear
-            }
-          }
-        )
-        .cornerRadius(6)
-    }
-    .buttonStyle(PlainButtonStyle())
-    .onHover { hover in
-      isHovering = hover
-    }
-  }
-}
+// MARK: - Simplified UI Components
 
-struct PopoverSelector<T: Hashable & CustomStringConvertible>: View {
+struct AppPopover<T: Hashable & CustomStringConvertible>: View {
   @Binding var selection: T
   let options: [T]
-  let label: () -> AnyView
-
+  let icon: String
+  let showText: Bool
   @State private var showPopover = false
 
   var body: some View {
     Button(action: { showPopover.toggle() }) {
-      label()
+      HStack(spacing: 6) {
+        Text(icon).font(.system(size: 12))
+        if showText && !selection.description.isEmpty {
+          Text(selection.description).font(.system(size: 12)).foregroundColor(.primary)
+        }
+      }.padding(.horizontal, 2)
     }
     .buttonStyle(PlainButtonStyle())
-    .popover(isPresented: $showPopover, arrowEdge: .bottom) {
+    .popover(isPresented: $showPopover) {
       VStack(alignment: .leading, spacing: 0) {
         ForEach(options, id: \.self) { option in
-          PopoverSelectorRow(
-            label: {
-              HStack {
-                Text(option.description)
-                  .foregroundColor(selection == option ? .accentColor : .primary)
-                if selection == option {
-                  Image(systemName: "checkmark")
-                    .foregroundColor(.accentColor)
-                }
+          Button(action: { selection = option; showPopover = false }) {
+            HStack {
+              Text(option.description)
+                .foregroundColor(selection == option ? .accentColor : .primary)
+              if selection == option {
+                Image(systemName: "checkmark").foregroundColor(.accentColor)
               }
-            },
-            isSelected: selection == option,
-            onTap: {
-              selection = option
-              showPopover = false
             }
-          )
+            .padding(.vertical, 6).padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selection == option ? Color.accentColor.opacity(0.18) : Color.clear)
+            .cornerRadius(6)
+          }.buttonStyle(PlainButtonStyle())
         }
-      }
-      .padding(10)
+      }.popoverStyle()
     }
   }
 }
@@ -1243,22 +1202,21 @@ struct PopoverSelector<T: Hashable & CustomStringConvertible>: View {
 // MARK: - UI Components - Menu Views
 
 struct ModelMenuView: View {
-  @Binding public var modelname: String
-  private let models: [String] = OpenAIConfig.load().models.values.flatMap { $0.models }.sorted()
+  @Binding var modelname: String
+  @State private var models: [String] = []
+  
   var body: some View {
-    PopoverSelector(
-      selection: $modelname, options: models,
-      label: {
-        AnyView(
-          HStack(spacing: 6) {
-            Text("\u{1F9E0}").font(.system(size: 14))
-            Text(modelname).font(.system(size: 12)).foregroundColor(.primary)
-          }
-          .padding(.horizontal, 2)
-        )
+    AppPopover(selection: $modelname, options: models, icon: "🧠", showText: true)
+      .task {
+        await loadModels()
       }
-    )
-    .frame(alignment: .trailing)
+  }
+  
+  private func loadModels() async {
+    await MainActor.run {
+      let config = OpenAIConfig.load()
+      models = config.allModels
+    }
   }
 }
 
@@ -1267,28 +1225,12 @@ struct PromptMenuView: View {
   @State private var prompts: [String] = ["None"]
 
   var body: some View {
-    PopoverSelector(
-      selection: $selectedPrompt, options: prompts,
-      label: {
-        AnyView(
-          HStack(spacing: 6) {
-            Text("\u{1F4C4}").font(.system(size: 12))
-            if selectedPrompt != "None" && !selectedPrompt.isEmpty {
-              Text(selectedPrompt).font(.system(size: 12)).foregroundColor(.primary)
-            }
-          }
-          .padding(.horizontal, 2)
-        )
+    AppPopover(selection: $selectedPrompt, options: prompts, icon: "📄", showText: selectedPrompt != "None")
+      .task {
+        let available = await ChatHistory.shared.getAvailablePrompts()
+        prompts = ["None"] + available
+        if !prompts.contains(selectedPrompt) { selectedPrompt = "None" }
       }
-    )
-    .frame(alignment: .trailing)
-    .task {
-      let availablePrompts = await ChatHistory.shared.getAvailablePrompts()
-      prompts = ["None"] + availablePrompts
-      if !prompts.contains(selectedPrompt) {
-        selectedPrompt = "None"
-      }
-    }
   }
 }
 
@@ -1494,8 +1436,8 @@ DispatchQueue.main.async {
 // MARK: - Configuration Models
 
 struct ModelConfig: Codable {
-  let baseURL: String
-  let apiKey: String
+  let baseURL: String?
+  let apiKey: String?
   let models: [String]
   let proxyEnabled: Bool?
   let proxyURL: String?
@@ -1503,7 +1445,13 @@ struct ModelConfig: Codable {
 
 struct OpenAIConfig: Codable, ConfigLoadable {
   let models: [String: ModelConfig]
+  let legacy: [String: ModelConfig]?
   let defaultModel: String
+  
+  // Only get models from the main models section, ignore legacy
+  var allModels: [String] {
+    return models.values.flatMap { $0.models }.sorted()
+  }
 
   static var configPath: URL {
     return FileManager.default.homeDirectoryForCurrentUser
@@ -1518,9 +1466,9 @@ struct OpenAIConfig: Codable, ConfigLoadable {
 
       if config.getConfig(for: config.defaultModel) == nil {
         print("Warning: Default model '\(config.defaultModel)' not found in config. Falling back.")
-        let fallbackModel = config.models.first?.value.models.first ?? "gpt-4-turbo-preview"
+        let fallbackModel = config.allModels.first ?? "gpt-4-turbo-preview"
         print("Using fallback model: \(fallbackModel)")
-        return OpenAIConfig(models: config.models, defaultModel: fallbackModel)
+        return OpenAIConfig(models: config.models, legacy: config.legacy, defaultModel: fallbackModel)
       }
       return config
 
@@ -1531,11 +1479,12 @@ struct OpenAIConfig: Codable, ConfigLoadable {
           baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY",
           models: ["gpt-4-turbo-preview", "gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)
       ]
-      return OpenAIConfig(models: defaultModels, defaultModel: "gpt-4-turbo-preview")
+      return OpenAIConfig(models: defaultModels, legacy: nil, defaultModel: "gpt-4-turbo-preview")
     }
   }
 
   func getConfig(for model: String) -> ModelConfig? {
+    // Only search in models section, ignore legacy
     for (_, config) in models {
       if config.models.contains(model) {
         return config
