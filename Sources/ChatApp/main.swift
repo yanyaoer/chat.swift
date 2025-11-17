@@ -3,10 +3,52 @@
 import AppKit
 import Foundation
 import SwiftUI
+import Speech
 
 // MARK: - Application Delegate
 
+extension Notification.Name {
+    static let rightOptionKeyDown = Notification.Name("rightOptionKeyDown")
+    static let rightOptionKeyUp = Notification.Name("rightOptionKeyUp")
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var eventMonitor: Any?
+    private var keyDownTimer: Timer?
+    private var isRightOptionDown = false
+
+    func applicationDidFinishLaunching(_ aNotification: Notification) {
+        SFSpeechRecognizer.requestAuthorization { authStatus in
+            if authStatus != .authorized {
+                print("Speech recognition not authorized")
+            }
+        }
+
+        AVAudioSession.sharedInstance().requestRecordPermission { granted in
+            if !granted {
+                print("Microphone access not granted")
+            }
+        }
+
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
+            if event.modifierFlags.contains(.rightOption) {
+                if !self.isRightOptionDown {
+                    self.isRightOptionDown = true
+                    NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
+                    self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
+                        NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
+                    }
+                }
+            } else {
+                if self.isRightOptionDown {
+                    self.isRightOptionDown = false
+                    self.keyDownTimer?.invalidate()
+                    NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
+                }
+            }
+        }
+    }
+
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     return true
   }
@@ -1003,6 +1045,7 @@ struct App: SwiftUI.App {
 
   @State private var input = ""
   @StateObject private var streamDelegate = StreamDelegate()
+  @StateObject private var speechManager = SpeechManager()
   @AppStorage("modelname") public var modelname = OpenAIConfig.getDefaultModel()
   @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
   @FocusState private var focused: Bool
@@ -1046,6 +1089,21 @@ struct App: SwiftUI.App {
       )
       .onAppear {
         focused = true
+      }
+      .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyDown)) { notification in
+          guard let isLongPress = notification.userInfo?["isLongPress"] as? Bool else { return }
+          if !isLongPress {
+              if !speechManager.isRecording {
+                  speechManager.startRecording()
+              }
+          } else {
+              speechManager.startRecognition()
+          }
+      }
+      .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyUp)) { _ in
+          if speechManager.isRecording {
+              speechManager.stopRecording()
+          }
       }
     }
     .windowStyle(HiddenTitleBarWindowStyle())
@@ -1091,6 +1149,9 @@ struct App: SwiftUI.App {
               isQueryActive = true
             }
           }
+        }
+        .onChange(of: speechManager.transcribedText) { _, newValue in
+            input = newValue
         }
     }
     .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
