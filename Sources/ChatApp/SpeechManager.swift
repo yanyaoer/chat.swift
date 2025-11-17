@@ -11,6 +11,9 @@ class SpeechManager: ObservableObject {
     private var speechAnalyzer: SpeechAnalyzer?
     private var transcriber: SpeechTranscriber?
 
+    private let audioQueue = DispatchQueue(label: "audio.queue", qos: .userInitiated)
+    private let recognitionQueue = DispatchQueue(label: "recognition.queue", qos: .userInitiated)
+
     private var inputStream: AsyncStream<AnalyzerInput>?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
 
@@ -60,27 +63,19 @@ class SpeechManager: ObservableObject {
 
     func startRecording() {
         isRecording = true
-        Task {
-            await startAudioEngine()
+        audioQueue.async {
+            self.startAudioEngine()
         }
     }
 
     func stopRecording() {
         isRecording = false
-        Task {
-            await stopAudioEngine()
+        audioQueue.async {
+            self.stopAudioEngine()
         }
     }
 
-    private func startAudioEngine() async {
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.record, mode: .measurement, options: .duckOthers)
-            try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            print("Audio session setup error: \(error)")
-            return
-        }
-
+    private func startAudioEngine() {
         (inputStream, inputContinuation) = AsyncStream<AnalyzerInput>.makeStream()
 
         let inputNode = audioEngine!.inputNode
@@ -100,29 +95,23 @@ class SpeechManager: ObservableObject {
         }
     }
 
-    private func stopAudioEngine() async {
+    private func stopAudioEngine() {
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         inputContinuation?.finish()
-
-        try? await self.speechAnalyzer?.finalize(through: nil)
-
-        do {
-            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        } catch {
-            print("Audio session deactivation error: \(error)")
-        }
     }
 
     func startRecognition() {
-        Task {
-            do {
-                try await speechAnalyzer?.start(inputSequence: inputStream!)
-                for try await result in transcriber!.results {
-                    self.transcribedText = result.text
+        recognitionQueue.async {
+            Task {
+                do {
+                    try await self.speechAnalyzer?.start(inputSequence: self.inputStream!)
+                    for try await result in self.transcriber!.results {
+                        self.transcribedText = result.text
+                    }
+                } catch {
+                    print("Recognition error: \(error)")
                 }
-            } catch {
-                print("Recognition error: \(error)")
             }
         }
     }

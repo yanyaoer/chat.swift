@@ -17,6 +17,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyDownTimer: Timer?
     private var isRightOptionDown = false
 
+    private let rightOptionKeyCode: UInt16 = 61
+
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         SFSpeechRecognizer.requestAuthorization { authStatus in
             if authStatus != .authorized {
@@ -24,26 +26,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        AVAudioSession.sharedInstance().requestRecordPermission { granted in
-            if !granted {
-                print("Microphone access not granted")
-            }
-        }
-
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
-            if event.modifierFlags.contains(.rightOption) {
-                if !self.isRightOptionDown {
-                    self.isRightOptionDown = true
-                    NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
-                    self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
-                        NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+            if event.keyCode == self.rightOptionKeyCode {
+                if event.type == .keyDown {
+                    if !self.isRightOptionDown {
+                        self.isRightOptionDown = true
+                        NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
+                        self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
+                            NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
+                        }
                     }
-                }
-            } else {
-                if self.isRightOptionDown {
-                    self.isRightOptionDown = false
-                    self.keyDownTimer?.invalidate()
-                    NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
+                } else if event.type == .keyUp {
+                    if self.isRightOptionDown {
+                        self.isRightOptionDown = false
+                        self.keyDownTimer?.invalidate()
+                        NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
+                    }
                 }
             }
         }
