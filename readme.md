@@ -103,6 +103,8 @@ example with [skhd](https://github.com/koekeishiya/skhd) or add Keyboard Shortcu
 ctrl + alt + shift + cmd - k	:	chat.swift
 ```
 
+- press `right option` key to recording audio and recognize to input text
+
 ## Feature:
 - minimal chat UI
 - always on top of desktop
@@ -113,6 +115,7 @@ ctrl + alt + shift + cmd - k	:	chat.swift
 - image upload and Understand
 [] support grouding web search with gemini-2.x
 [x] display/toggle thinking for reasoning model
+[x] ASR with [speech framework](https://developer.apple.com/documentation/speech)
 [] ASR with sherppa-onnx or whisper.cpp
 [] multi-models stream with user input and prompt recap as wireshark
 [] mlx-lm models support from local

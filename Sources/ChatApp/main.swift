@@ -1,6 +1,7 @@
 #!/usr/bin/env xcrun -sdk macosx swift
 
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 import Speech
@@ -143,6 +144,25 @@ extension View {
   }
 }
 
+// MARK: - Constants
+
+enum AppConstants {
+  static let configDirectoryName = "chat.swift"
+  static let historyFileName = "history.md"
+  static let promptsDirectoryName = "prompts"
+  static let mcpConfigFileName = "mcp_config.json"
+  static let mainConfigFileName = "config.json"
+  
+  enum UserDefaults {
+    static let modelName = "modelname"
+    static let selectedPrompt = "selectedPrompt"
+  }
+  
+  enum DefaultModels {
+    static let openAI = "gpt-4-turbo-preview"
+  }
+}
+
 // MARK: - Error Handling
 
 enum AppError: LocalizedError {
@@ -151,6 +171,10 @@ enum AppError: LocalizedError {
   case networkError(String)
   case mcpError(String)
   case fileOperationError(String)
+  case jsonParsingError(String)
+  case invalidURL(String)
+  case mcpServerNotFound(String)
+  case mcpExecutionFailed(String)
 
   var errorDescription: String? {
     switch self {
@@ -164,6 +188,14 @@ enum AppError: LocalizedError {
       return "MCP服务错误: \(message)"
     case .fileOperationError(let message):
       return "文件操作错误: \(message)"
+    case .jsonParsingError(let message):
+      return "JSON解析错误: \(message)"
+    case .invalidURL(let url):
+      return "无效的URL: \(url)"
+    case .mcpServerNotFound(let name):
+      return "MCP服务器未找到或未激活: \(name)"
+    case .mcpExecutionFailed(let details):
+      return "MCP工具执行失败: \(details)"
     }
   }
 }
@@ -276,8 +308,8 @@ struct MCPConfig: Codable, ConfigLoadable {
   static var configPath: URL {
     return FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".config")
-      .appendingPathComponent("chat.swift")
-      .appendingPathComponent("mcp_config.json")
+      .appendingPathComponent(AppConstants.configDirectoryName)
+      .appendingPathComponent(AppConstants.mcpConfigFileName)
   }
 }
 
@@ -295,7 +327,7 @@ extension ConfigLoadable {
 }
 
 extension OpenAIConfig {
-  static let safeDefaultModel = "gpt-4-turbo-preview"
+  static let safeDefaultModel = AppConstants.DefaultModels.openAI
   
   static func getDefaultModel() -> String {
     do {
@@ -314,24 +346,31 @@ struct ToolCall {
   let isComplete: Bool
 }
 
-// MARK: - Simplified Tool Parser
-extension String {
-  func extractToolCalls() -> [ToolCall] {
+// MARK: - Tool Parser
+
+struct ToolParser {
+  // Regex patterns as static constants
+  private static let toolUseStartTag = "<tool_use>"
+  private static let toolUseEndTag = "</tool_use>"
+  private static let xmlTagPattern = #"<(\w+)>"#
+  private static let parameterPattern = #"<(\w+)>(.*?)</\1>"#
+  
+  static func extractToolCalls(from text: String) -> [ToolCall] {
     var calls: [ToolCall] = []
-    var startIndex = startIndex
+    var startIndex = text.startIndex
     
-    while let range = self[startIndex...].range(of: "<tool_use>") {
+    while let range = text[startIndex...].range(of: toolUseStartTag) {
       let toolStart = range.upperBound
-      if let endRange = self[toolStart...].range(of: "</tool_use>") {
-        let toolContent = String(self[toolStart..<endRange.lowerBound])
-        if let call = toolContent.parseToolCall(isComplete: true) {
+      if let endRange = text[toolStart...].range(of: toolUseEndTag) {
+        let toolContent = String(text[toolStart..<endRange.lowerBound])
+        if let call = parseToolCall(from: toolContent, isComplete: true) {
           calls.append(call)
         }
         startIndex = endRange.upperBound
       } else {
         // Incomplete tool call
-        let toolContent = String(self[toolStart...])
-        if let call = toolContent.parseToolCall(isComplete: false) {
+        let toolContent = String(text[toolStart...])
+        if let call = parseToolCall(from: toolContent, isComplete: false) {
           calls.append(call)
         }
         break
@@ -340,42 +379,111 @@ extension String {
     return calls
   }
   
-  private func parseToolCall(isComplete: Bool) -> ToolCall? {
+  private static func parseToolCall(from content: String, isComplete: Bool) -> ToolCall? {
     // Extract tool name (first XML tag)
-    guard let nameMatch = range(of: #"<(\w+)>"#, options: .regularExpression),
-          let toolName = String(self[nameMatch]).extractBetween("<", ">") else { return nil }
+    guard let nameMatch = content.range(of: xmlTagPattern, options: .regularExpression),
+          let toolName = extractBetween(String(content[nameMatch]), start: "<", end: ">") else {
+      return nil
+    }
     
     // Extract parameters within tool content
     var parameters: [String: String] = [:]
     
     // Find content within the tool tag first
-    if let toolContentRange = range(of: #"<\#(toolName)>(.*?)</\#(toolName)>"#, options: .regularExpression) {
-      let toolContent = String(self[toolContentRange])
+    let toolTagPattern = "<\(toolName)>(.*?)</\(toolName)>"
+    if let toolContentRange = content.range(of: toolTagPattern, options: .regularExpression) {
+      let toolContent = String(content[toolContentRange])
         .replacingOccurrences(of: "<\(toolName)>", with: "")
         .replacingOccurrences(of: "</\(toolName)>", with: "")
       
       // Parse individual parameters
-      let paramPattern = #"<(\w+)>(.*?)</\1>"#
-      let regex = try? NSRegularExpression(pattern: paramPattern, options: [.dotMatchesLineSeparators])
-      
-      regex?.enumerateMatches(in: toolContent, range: NSRange(toolContent.startIndex..<toolContent.endIndex, in: toolContent)) { match, _, _ in
-        guard let match = match, match.numberOfRanges >= 3,
-              let nameRange = Range(match.range(at: 1), in: toolContent),
-              let valueRange = Range(match.range(at: 2), in: toolContent) else { return }
-        
-        let name = String(toolContent[nameRange])
-        let value = String(toolContent[valueRange])
-        parameters[name] = value
+      if let regex = try? NSRegularExpression(pattern: parameterPattern, options: [.dotMatchesLineSeparators]) {
+        regex.enumerateMatches(in: toolContent, range: NSRange(toolContent.startIndex..<toolContent.endIndex, in: toolContent)) { match, _, _ in
+          guard let match = match, match.numberOfRanges >= 3,
+                let nameRange = Range(match.range(at: 1), in: toolContent),
+                let valueRange = Range(match.range(at: 2), in: toolContent) else { return }
+          
+          let name = String(toolContent[nameRange])
+          let value = String(toolContent[valueRange])
+          parameters[name] = value
+        }
       }
     }
     
     return ToolCall(toolName: toolName, parameters: parameters, isComplete: isComplete)
   }
   
-  private func extractBetween(_ start: String, _ end: String) -> String? {
-    guard let startRange = range(of: start),
-          let endRange = self[startRange.upperBound...].range(of: end) else { return nil }
-    return String(self[startRange.upperBound..<endRange.lowerBound])
+  private static func extractBetween(_ text: String, start: String, end: String) -> String? {
+    guard let startRange = text.range(of: start),
+          let endRange = text[startRange.upperBound...].range(of: end) else { return nil }
+    return String(text[startRange.upperBound..<endRange.lowerBound])
+  }
+}
+
+// MARK: - Stream Processor
+
+struct StreamChunk {
+  let content: String
+  let isReasoning: Bool
+}
+
+struct StreamProcessor {
+  
+  // Process incoming data and split into complete lines
+  static func processIncomingData(_ newData: String, buffer: inout String) -> [String] {
+    buffer += newData
+    
+    let lines = buffer.components(separatedBy: "\n")
+    
+    // Keep the last line in buffer if it's incomplete (no trailing newline)
+    if !buffer.hasSuffix("\n") && lines.count > 1 {
+      buffer = lines.last ?? ""
+      return Array(lines.dropLast())
+    } else {
+      buffer = ""
+      return lines
+    }
+  }
+  
+  // Parse SSE (Server-Sent Events) lines and extract content chunks
+  static func parseSSELine(_ line: String) -> StreamChunk? {
+    // Handle [DONE] marker
+    if line.contains("data: [DONE]") {
+      return nil
+    }
+    
+    // Must start with "data: "
+    guard line.hasPrefix("data: ") else {
+      return nil
+    }
+    
+    // Parse JSON data
+    let jsonString = String(line.dropFirst(6))
+    guard !jsonString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          let jsonData = jsonString.data(using: .utf8) else {
+      return nil
+    }
+    
+    do {
+      guard let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+            let choices = json["choices"] as? [[String: Any]],
+            let firstChoice = choices.first,
+            let delta = firstChoice["delta"] as? [String: Any] else {
+        return nil
+      }
+      
+      // Check for reasoning content first, then regular content
+      if let reasoningContent = delta["reasoning_content"] as? String {
+        return StreamChunk(content: reasoningContent, isReasoning: true)
+      } else if let regularContent = delta["content"] as? String {
+        return StreamChunk(content: regularContent, isReasoning: false)
+      }
+      
+      return nil
+    } catch {
+      print("Error parsing JSON line: \(jsonString), Error: \(error)")
+      return nil
+    }
   }
 }
 
@@ -439,9 +547,9 @@ class MCPManager: ObservableObject {
     mcpServers = updatedServers
   }
 
-  func callMCPTool(serverName: String, toolName: String, arguments: [String: Any]) async -> String {
+  func callMCPTool(serverName: String, toolName: String, arguments: [String: Any]) async -> Result<String, AppError> {
     guard let server = mcpServers[serverName], activeMCPServers.contains(serverName) else {
-      return "Server \(serverName) not found or not active"
+      return .failure(.mcpServerNotFound(serverName))
     }
 
     if server.isRemote {
@@ -452,10 +560,10 @@ class MCPManager: ObservableObject {
   }
 
   private func callRemoteMCPTool(server: MCPServer, toolName: String, arguments: [String: Any])
-    async -> String
+    async -> Result<String, AppError>
   {
     guard let urlString = server.url, let url = URL(string: urlString) else {
-      return "Invalid server URL"
+      return .failure(.invalidURL(server.url ?? "nil"))
     }
 
     // Create the MCP tool call request
@@ -500,28 +608,28 @@ class MCPManager: ObservableObject {
             if let resultData = try? JSONSerialization.data(withJSONObject: result),
               let resultString = String(data: resultData, encoding: .utf8)
             {
-              return resultString
+              return .success(resultString)
             }
-            return "\(result)"
+            return .success("\(result)")
           }
-          return String(data: data, encoding: .utf8) ?? "No response data"
+          return .success(String(data: data, encoding: .utf8) ?? "No response data")
         } else {
-          return
-            "HTTP Error \(httpResponse.statusCode): \(String(data: data, encoding: .utf8) ?? "Unknown error")"
+          let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown error"
+          return .failure(.networkError("HTTP \(httpResponse.statusCode): \(errorMsg)"))
         }
       }
 
-      return String(data: data, encoding: .utf8) ?? "No response"
+      return .failure(.networkError("No response"))
     } catch {
-      return "Failed to call remote MCP tool: \(error.localizedDescription)"
+      return .failure(.mcpError("Failed to call remote MCP tool: \(error.localizedDescription)"))
     }
   }
 
   private func callLocalMCPTool(server: MCPServer, toolName: String, arguments: [String: Any]) async
-    -> String
+    -> Result<String, AppError>
   {
     guard let command = server.command, let args = server.args else {
-      return "Local server missing command or args"
+      return .failure(.mcpError("Local server missing command or args"))
     }
 
     let process = Process()
@@ -549,13 +657,13 @@ class MCPManager: ObservableObject {
       let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
 
       if process.terminationStatus == 0 {
-        return String(data: outputData, encoding: .utf8) ?? "No output"
+        return .success(String(data: outputData, encoding: .utf8) ?? "No output")
       } else {
         let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-        return "Error executing MCP tool: \(errorOutput)"
+        return .failure(.mcpExecutionFailed("Error executing MCP tool: \(errorOutput)"))
       }
     } catch {
-      return "Failed to execute MCP tool: \(error.localizedDescription)"
+      return .failure(.mcpError("Failed to execute MCP tool: \(error.localizedDescription)"))
     }
   }
 }
@@ -570,12 +678,12 @@ class ChatHistory {
   private init() {
     let configPath = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".config")
-      .appendingPathComponent("chat.swift")
+      .appendingPathComponent(AppConstants.configDirectoryName)
 
     try? FileManager.default.createDirectory(at: configPath, withIntermediateDirectories: true)
 
-    historyPath = configPath.appendingPathComponent("history.md")
-    promptsPath = configPath.appendingPathComponent("prompts")
+    historyPath = configPath.appendingPathComponent(AppConstants.historyFileName)
+    promptsPath = configPath.appendingPathComponent(AppConstants.promptsDirectoryName)
     try? FileManager.default.createDirectory(at: promptsPath, withIntermediateDirectories: true)
   }
 
@@ -898,7 +1006,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   private func detectAndExecuteMCPCall(_ text: String) async {
-    let toolCalls = text.extractToolCalls()
+    let toolCalls = ToolParser.extractToolCalls(from: text)
     for call in toolCalls where call.isComplete && call.toolName == "mcp_call" {
       await executeMCPTool(call)
     }
@@ -911,12 +1019,18 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
     let args = call.parameters.filter { !["server", "tool"].contains($0.key) }
     let argsDisplay = args.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
     
-    await updateUI("🔧 执行 MCP 工具", "服务器: \(server)\n工具: \(tool)\n\(argsDisplay.isEmpty ? "" : "参数:\n\(argsDisplay)\n")执行中...")
+    let argsInfo = argsDisplay.isEmpty ? "" : "参数:\n\(argsDisplay)\n"
+    await updateUI("🔧 执行 MCP 工具", "服务器: \(server)\n工具: \(tool)\n\(argsInfo)\n执行中...")
     
     let result = await MCPManager.shared.callMCPTool(serverName: server, toolName: tool, arguments: args)
-    let formatted = formatResult(result)
     
-    await updateUI("📋 工具结果", "```\n\(formatted)\n```")
+    switch result {
+    case .success(let output):
+        let formatted = formatResult(output)
+        await updateUI("📋 工具结果", "```\n\(formatted)\n```")
+    case .failure(let error):
+        await updateUI("❌ 工具执行失败", error.localizedDescription)
+    }
   }
   
   @MainActor private func updateUI(_ header: String, _ content: String) {
@@ -949,7 +1063,8 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-    print("📥 [didReceive] Received \(data.count) bytes, Message ID: \(currentMessageID ?? "nil")")
+    let msgID = currentMessageID ?? "nil"
+    print("📥 [didReceive] Received \(data.count) bytes, Message ID: \(msgID)")
     
     guard currentTask == dataTask, currentMessageID != nil else {
       print("⚠️ [didReceive] Ignoring data - task mismatch or no message ID")
@@ -971,115 +1086,77 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         return
       }
 
-      // Add new data to buffer
-      dataBuffer += text
-
-      // Process complete lines from buffer
-      let lines = dataBuffer.components(separatedBy: "\n")
-
-      // Keep the last line in buffer if it's incomplete (no trailing newline)
-      if !dataBuffer.hasSuffix("\n") && lines.count > 1 {
-        dataBuffer = lines.last ?? ""
-        let completeLines = Array(lines.dropLast())
-        processLines(completeLines)
-      } else {
-        dataBuffer = ""
-        processLines(lines)
-      }
+      // Use StreamProcessor to handle buffer and extract complete lines
+      let lines = StreamProcessor.processIncomingData(text, buffer: &dataBuffer)
+      processLines(lines)
     }
   }
 
   private func processLines(_ lines: [String]) {
     for line in lines {
       print("🔄 [processLines] Processing line: \(line.prefix(100))...")
-      if line.hasPrefix("data: ") {
-        // Handle [DONE] marker
-        if line.contains("data: [DONE]") {
-          print("✅ [processLines] Received [DONE] marker")
-          let finalResponse = currentResponse
-          DispatchQueue.main.async {
-            if !finalResponse.isEmpty {
-              let assistantMessage = ChatMessage(
-                role: "assistant", content: .text(finalResponse), model: self.currentModel,
-                id: self.currentMessageID)
-              ChatHistory.shared.saveMessage(assistantMessage)
-            }
-            self.currentResponse = ""
-            self.isCurrentlyReasoning = false
-            self.pendingMCPCall = ""
-            self.dataBuffer = ""
-            self.currentTask = nil
-            self.currentMessageID = nil
-            self.onQueryCompleted?()
+      
+      // Check for [DONE] marker
+      if line.contains("data: [DONE]") {
+        print("✅ [processLines] Received [DONE] marker")
+        let finalResponse = currentResponse
+        DispatchQueue.main.async {
+          if !finalResponse.isEmpty {
+            let assistantMessage = ChatMessage(
+              role: "assistant", content: .text(finalResponse), model: self.currentModel,
+              id: self.currentMessageID)
+            ChatHistory.shared.saveMessage(assistantMessage)
           }
-          return
+          self.currentResponse = ""
+          self.isCurrentlyReasoning = false
+          self.pendingMCPCall = ""
+          self.dataBuffer = ""
+          self.currentTask = nil
+          self.currentMessageID = nil
+          self.onQueryCompleted?()
+        }
+        return
+      }
+
+      // Use StreamProcessor to parse SSE line
+      guard let chunk = StreamProcessor.parseSSELine(line) else {
+        continue
+      }
+      
+      print("✨ [processLines] Got content chunk (\(chunk.isReasoning ? "reasoning" : "normal")): \(chunk.content.prefix(50))...")
+      
+      DispatchQueue.main.async { [chunk] in
+        guard self.currentMessageID != nil else { return }
+
+        var chunkToAppend = chunk.content
+        var attributedChunk: AttributedString
+
+        // Handle transition from reasoning to normal content
+        if !chunk.isReasoning && self.isCurrentlyReasoning {
+          chunkToAppend = "\n" + chunkToAppend
+          self.isCurrentlyReasoning = false
         }
 
-        // Parse JSON data for actual content
-        let jsonString = String(line.dropFirst(6))
-        guard !jsonString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-          let jsonData = jsonString.data(using: .utf8)
-        else {
-          continue
+        if chunk.isReasoning {
+          self.isCurrentlyReasoning = true
         }
 
-        do {
-          if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-            let choices = json["choices"] as? [[String: Any]],
-            let firstChoice = choices.first,
-            let delta = firstChoice["delta"] as? [String: Any]
-          {
-            var contentChunk = ""
-            var isChunkReasoning = false
+        self.currentResponse += chunkToAppend
+        self.pendingMCPCall += chunkToAppend
 
-            if let reasoningContent = delta["reasoning_content"] as? String {
-              contentChunk = reasoningContent
-              isChunkReasoning = true
-            } else if let regularContent = delta["content"] as? String {
-              contentChunk = regularContent
-            }
+        attributedChunk = AttributedString(chunkToAppend)
+        if chunk.isReasoning {
+          attributedChunk.foregroundColor = .secondary
+        }
+        self.output += attributedChunk
 
-            if !contentChunk.isEmpty {
-              print("✨ [processLines] Got content chunk (\(isChunkReasoning ? "reasoning" : "normal")): \(contentChunk.prefix(50))...")
-              DispatchQueue.main.async { [contentChunk, isChunkReasoning] in
-                guard self.currentMessageID != nil else { return }
-
-                var chunkToAppend = contentChunk
-                var attributedChunk: AttributedString
-
-                if !isChunkReasoning && self.isCurrentlyReasoning {
-                  chunkToAppend = "\n" + chunkToAppend
-                  self.isCurrentlyReasoning = false
-                }
-
-                if isChunkReasoning {
-                  self.isCurrentlyReasoning = true
-                }
-
-                self.currentResponse += chunkToAppend
-                self.pendingMCPCall += chunkToAppend
-
-                attributedChunk = AttributedString(chunkToAppend)
-                if isChunkReasoning {
-                  attributedChunk.foregroundColor = .secondary
-                }
-                self.output += attributedChunk
-
-                // Check for MCP action pattern in accumulated text
-                Task {
-                  await self.detectAndExecuteMCPCall(self.pendingMCPCall)
-                }
-              }
-            }
-          }
-        } catch {
-          print("Error parsing JSON line: \(jsonString), Error: \(error)")
-          // Don't show parsing errors to user for malformed chunks, just log them
+        // Check for MCP action pattern in accumulated text
+        Task {
+          await self.detectAndExecuteMCPCall(self.pendingMCPCall)
         }
       }
     }
   }
-
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     guard currentTask == task && currentMessageID != nil else {
@@ -1127,203 +1204,48 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 }
 
-// MARK: - UI Components - Main App
+// MARK: - View Model
 
 @MainActor
-struct App: SwiftUI.App {
-  @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-
-  @State private var input = ""
-  @StateObject private var streamDelegate = StreamDelegate()
-  @StateObject private var speechManager = SpeechManager()
-  @AppStorage("modelname") public var modelname = OpenAIConfig.getDefaultModel()
-  @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
-  @State private var isRightOptionDown = false
-  @State private var initialInputText = ""
-  @State private var insertionIndex = 0
-
-  @FocusState private var focused: Bool
-  @State private var selectedFileURL: URL? = nil
-  @State private var selectedFileName: String? = nil
-  @State private var isQueryActive: Bool = false
-  @State private var currentMessageID: String? = nil
-
-  var body: some Scene {
-    WindowGroup {
-      VStack(alignment: .leading) {
-        HStack {
-          ModelMenuView(modelname: $modelname)
-          PromptMenuView(selectedPrompt: $selectedPrompt)
-          MCPMenuView()
-
-          FileUploadButton(selectedFileName: $selectedFileName) { fileURL in
-            self.selectedFileURL = fileURL
-          }
-        }
-        .offset(x: 0, y: 5)
-        .ignoresSafeArea()
-        .frame(maxWidth: .infinity, maxHeight: 0, alignment: .trailing)
-
-        LLMInputView
-        Divider()
-
-        if !streamDelegate.output.characters.isEmpty {
-          LLMOutputView
-        } else {
-          Spacer(minLength: 20)
-        }
-      }
-      .background(VisualEffect().ignoresSafeArea())
-      .frame(minWidth: 400, minHeight: 150, alignment: .topLeading)
-      .onReceive(
-        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification),
-        perform: { _ in
-          exit(0)
-        }
-      )
-      .onAppear {
-        focused = true
-      }
-      .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyDown)) { notification in
-          print("🎤 Right Option key down detected")
-          guard let isLongPress = notification.userInfo?["isLongPress"] as? Bool else { return }
-          // Ignore long press for now - just start recording on any press
-          if !speechManager.isRecording {
-              print("🎤 Starting recording")
-              speechManager.startRecording()
-          }
-      }
-      .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyUp)) { _ in
-          print("🎤 Right Option key up detected")
-          Task { @MainActor in
-              if speechManager.isRecording {
-                  print("🎤 Stopping recording")
-                  speechManager.stopRecording()
-              }
-          }
-      }
-    }
-    .windowStyle(HiddenTitleBarWindowStyle())
-    .defaultSize(width: 0.5, height: 1.0)
+final class ChatViewModel: ObservableObject {
+  @Published var input: String = ""
+  @Published var isQueryActive: Bool = false
+  @Published var currentMessageID: String?
+  @Published var selectedFileURL: URL?
+  @Published var selectedFileName: String?
+  
+  let streamDelegate: StreamDelegate
+  let speechManager: SpeechManager
+  
+  var modelname: String = OpenAIConfig.getDefaultModel()
+  var selectedPrompt: String = ""
+  
+  private var cancellables = Set<AnyCancellable>()
+  
+  init() {
+    self.streamDelegate = StreamDelegate()
+    self.speechManager = SpeechManager()
+    
+    // Forward nested ObservableObjects' changes to trigger view updates
+    speechManager.objectWillChange.sink { [weak self] _ in
+      self?.objectWillChange.send()
+    }.store(in: &cancellables)
+    
+    streamDelegate.objectWillChange.sink { [weak self] _ in
+      self?.objectWillChange.send()
+    }.store(in: &cancellables)
   }
-
-  private var LLMInputView: some View {
-    HStack {
-      Button(action: {
-        if isQueryActive {
-          print("🛑 [Button] User manually stopping query")
-          streamDelegate.cancelCurrentQuery()
-          input = ""  // Clear input when manually stopping
-          isQueryActive = false
-        } else {
-          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            print("▶️ [Button] User starting query")
-            Task {
-              await submitInput()
-              isQueryActive = true
-            }
-          } else {
-            print("⚠️ [Button] Empty input, not starting query")
-          }
-        }
-      }) {
-        // Text(isQueryActive ? "\u{1F9CA}" : "\u{1F3B2}")
-        Text("\u{1F3B2}")
-          .foregroundColor(.white)
-          .cornerRadius(5)
-      }
-      .buttonStyle(PlainButtonStyle())
-      .rotationEffect(isQueryActive ? .degrees(360) : .degrees(0))
-      .animation(
-        isQueryActive
-          ? Animation.linear(duration: 2.0).repeatForever(autoreverses: false) : .default,
-        value: isQueryActive)
-
-      TextField("write something..", text: $input, axis: .vertical)
-        .lineLimit(1...5)
-        .textFieldStyle(.plain)
-        .focused($focused)
-        .onSubmit {
-          if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            print("⏎ [onSubmit] User submitted input via Enter key")
-            Task {
-              await submitInput()
-              isQueryActive = true
-            }
-          } else {
-            print("⚠️ [onSubmit] Empty input, not submitting")
-          }
-        }
-        .onChange(of: speechManager.transcribedText) { _, newValue in
-            if !newValue.isEmpty {
-                // Insert at the captured cursor position
-                let prefix = String(initialInputText.prefix(insertionIndex))
-                let suffix = String(initialInputText.suffix(initialInputText.count - insertionIndex))
-                input = prefix + newValue + suffix
-                
-                // Calculate the new cursor position (after the inserted text)
-                let newCursorPosition = insertionIndex + newValue.count
-                
-                // Use DispatchQueue to defer cursor update until after SwiftUI updates the TextField
-                DispatchQueue.main.async {
-                    // Access the underlying NSTextView to set cursor position
-                    if let window = NSApplication.shared.keyWindow,
-                       let textView = window.firstResponder as? NSTextView {
-                        // Set the selected range to position cursor after the inserted text
-                        // selectedRange is an NSRange with location and length
-                        // For a cursor position (no selection), length = 0
-                        let range = NSRange(location: min(newCursorPosition, input.count), length: 0)
-                        textView.setSelectedRange(range)
-                        print("📍 Cursor positioned at: \(newCursorPosition)")
-                    }
-                }
-            }
-        }
-    }
-    .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
-    .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyDown)) { notification in
-        print("🎤 Right Option key down detected")
-        guard let isLongPress = notification.userInfo?["isLongPress"] as? Bool else { return }
-        // Ignore long press for now - just start recording on any press
-        if !speechManager.isRecording {
-            print("🎤 Starting recording")
-            
-            // Capture current input and cursor position
-            initialInputText = input
-            
-            // Try to get cursor position from the underlying NSTextView
-            if let window = NSApplication.shared.keyWindow,
-               let textView = window.firstResponder as? NSTextView {
-                // Use the selected range's location
-                // Note: This is an NSRange location (UTF-16 code units)
-                // We need to be careful mapping this to Swift String index if there are emojis
-                // For simplicity, we'll clamp it to the string count
-                let range = textView.selectedRange()
-                // Convert NSRange location to String index offset safely
-                // This is a simplification; for complex emojis it might need more robust handling
-                // but for a basic implementation it usually works fine as long as we don't split graphemes
-                insertionIndex = min(max(0, range.location), input.count)
-            } else {
-                // Fallback to appending
-                insertionIndex = input.count
-            }
-            
-            print("📍 Insertion index: \(insertionIndex)")
-            speechManager.startRecording()
-        }
-    }
-  }
-
-  private func submitInput() async {
+  
+  func submitInput() async {
     print("📤 [submitInput] === START ===")
     print("📤 [submitInput] Input text: '\(input)'")
     
     let newMessageID = UUID().uuidString
     self.currentMessageID = newMessageID
-
+    
     let textToSend = self.input
     let fileURLToSend = self.selectedFileURL
-
+    
     print("📤 [submitInput] Message ID: \(newMessageID)")
     print("📤 [submitInput] Text to send: '\(textToSend)'")
     print("📤 [submitInput] Model: \(modelname)")
@@ -1332,7 +1254,7 @@ struct App: SwiftUI.App {
     
     self.selectedFileURL = nil
     self.selectedFileName = nil
-
+    
     if let url = fileURLToSend {
       print("📤 [submitInput] Processing file upload...")
       if let contentToSend = await ChatHistory.shared.handleFileUpload(
@@ -1371,15 +1293,213 @@ struct App: SwiftUI.App {
     }
     print("📤 [submitInput] === END ===")
   }
-
+  
   func queryDidComplete() {
     print("✅ [queryDidComplete] Query completed, setting isQueryActive to false")
     isQueryActive = false
   }
+  
+  func cancelQuery() {
+    print("🛑 [cancelQuery] Cancelling query...")
+    streamDelegate.cancelCurrentQuery()
+    queryDidComplete()
+  }
+}
 
+// MARK: - UI Components - Main App
+
+@MainActor
+struct App: SwiftUI.App {
+  @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
+  @StateObject private var viewModel = ChatViewModel()
+  @AppStorage(AppConstants.UserDefaults.modelName) public var modelname = OpenAIConfig.getDefaultModel()
+  @AppStorage(AppConstants.UserDefaults.selectedPrompt) private var selectedPrompt: String = ""
+  
+  // Speech recognition state
+  @State private var initialInputText = ""
+  @State private var insertionIndex = 0
+  
+  @FocusState private var focused: Bool
+
+  var body: some Scene {
+    WindowGroup {
+      VStack(alignment: .leading) {
+        HStack {
+          ModelMenuView(modelname: $modelname)
+          PromptMenuView(selectedPrompt: $selectedPrompt)
+          MCPMenuView()
+
+          FileUploadButton(selectedFileName: $viewModel.selectedFileName) { fileURL in
+            viewModel.selectedFileURL = fileURL
+          }
+        }
+        .offset(x: 0, y: 5)
+        .ignoresSafeArea()
+        .frame(maxWidth: .infinity, maxHeight: 0, alignment: .trailing)
+
+        LLMInputView
+        Divider()
+
+        if !viewModel.streamDelegate.output.characters.isEmpty {
+          LLMOutputView
+        } else {
+          Spacer(minLength: 20)
+        }
+      }
+      .background(VisualEffect().ignoresSafeArea())
+      .frame(minWidth: 400, minHeight: 150, alignment: .topLeading)
+      .onReceive(
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification),
+        perform: { _ in
+          exit(0)
+        }
+      )
+      .onAppear {
+        focused = true
+        viewModel.modelname = modelname
+        viewModel.selectedPrompt = selectedPrompt
+      }
+      .onChange(of: modelname) { _, newValue in
+        viewModel.modelname = newValue
+      }
+      .onChange(of: selectedPrompt) { _, newValue in
+        viewModel.selectedPrompt = newValue
+      }
+    }
+    .windowStyle(HiddenTitleBarWindowStyle())
+    .defaultSize(width: 0.5, height: 1.0)
+  }
+}
+
+// MARK: - App Extensions - Input View
+
+extension App {
+  private var LLMInputView: some View {
+    HStack {
+      Button(action: {
+        if viewModel.isQueryActive {
+          print("🛑 [Button] User manually stopping query")
+          viewModel.cancelQuery()
+          viewModel.input = ""
+        } else {
+          if !viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            print("▶️ [Button] User starting query")
+            Task {
+              viewModel.isQueryActive = true
+              await viewModel.submitInput()
+            }
+          } else {
+            print("⚠️ [Button] Empty input, not starting query")
+          }
+        }
+      }) {
+        // Text(viewModel.isQueryActive ? "\u{1F9CA}" : "\u{1F3B2}")
+        Text("\u{1F3B2}")
+          .foregroundColor(.white)
+          .cornerRadius(5)
+      }
+      .buttonStyle(PlainButtonStyle())
+      .rotationEffect(viewModel.isQueryActive ? .degrees(360) : .degrees(0))
+      .animation(
+        viewModel.isQueryActive
+          ? Animation.linear(duration: 2.0).repeatForever(autoreverses: false) : .default,
+        value: viewModel.isQueryActive)
+
+      TextField("write something..", text: $viewModel.input, axis: .vertical)
+        .lineLimit(1...5)
+        .textFieldStyle(.plain)
+        .focused($focused)
+        .onSubmit {
+          if !viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            print("⏎ [onSubmit] User submitted input via Enter key")
+            Task {
+              viewModel.isQueryActive = true
+              await viewModel.submitInput()
+            }
+          } else {
+            print("⚠️ [onSubmit] Empty input, not submitting")
+          }
+        }
+        .onChange(of: viewModel.speechManager.transcribedText) { oldValue, newValue in
+            print("🔄 [onChange] transcribedText changed from '\(oldValue)' to '\(newValue)'")
+            if !newValue.isEmpty {
+                print("📝 [onChange] Inserting text at index \(insertionIndex)")
+                print("📝 [onChange] Initial text: '\(initialInputText)'")
+                // Insert at the captured cursor position
+                let prefix = String(initialInputText.prefix(insertionIndex))
+                let suffix = String(initialInputText.suffix(initialInputText.count - insertionIndex))
+                viewModel.input = prefix + newValue + suffix
+                print("📝 [onChange] New input: '\(viewModel.input)'")
+                
+                // Calculate the new cursor position (after the inserted text)
+                let newCursorPosition = insertionIndex + newValue.count
+                
+                // Use DispatchQueue to defer cursor update until after SwiftUI updates the TextField
+                DispatchQueue.main.async {
+                    // Access the underlying NSTextView to set cursor position
+                    if let window = NSApplication.shared.keyWindow,
+                       let textView = window.firstResponder as? NSTextView {
+                        // Set the selected range to position cursor after the inserted text
+                        // selectedRange is an NSRange with location and length
+                        // For a cursor position (no selection), length = 0
+                        let range = NSRange(location: min(newCursorPosition, self.viewModel.input.count), length: 0)
+                        textView.setSelectedRange(range)
+                        print("📍 Cursor positioned at: \(newCursorPosition)")
+                    }
+                }
+            }
+        }
+    }
+    .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+    .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyDown)) { notification in
+        print("🎤 Right Option key down detected")
+        guard notification.userInfo?["isLongPress"] != nil else { return }
+        if !viewModel.speechManager.isRecording {
+            print("🎤 Starting recording")
+            
+            // Capture current input and cursor position
+            initialInputText = viewModel.input
+            
+            // Try to get cursor position from the underlying NSTextView
+            if let window = NSApplication.shared.keyWindow,
+               let textView = window.firstResponder as? NSTextView {
+                // Use the selected range's location
+                // Note: This is an NSRange location (UTF-16 code units)
+                // We need to be careful mapping this to Swift String index if there are emojis
+                // For simplicity, we'll clamp it to the string count
+                let range = textView.selectedRange()
+                // Convert NSRange location to String index offset safely
+                // This is a simplification; for complex emojis it might need more robust handling
+                // but for a basic implementation it usually works fine as long as we don't split graphemes
+                insertionIndex = min(max(0, range.location), viewModel.input.count)
+            } else {
+                // Fallback to appending
+                insertionIndex = viewModel.input.count
+            }
+            
+            print("📍 Insertion index: \(insertionIndex)")
+            viewModel.speechManager.startRecording()
+        }
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyUp)) { _ in
+        print("🎤 Right Option key up detected")
+        Task { @MainActor in
+            if viewModel.speechManager.isRecording {
+                print("🎤 Stopping recording")
+                viewModel.speechManager.stopRecording()
+            }
+        }
+    }
+  }
+}
+
+// MARK: - App Extensions - Output View
+
+extension App {
   private var LLMOutputView: some View {
     ScrollView {
-      Text(streamDelegate.output)
+      Text(viewModel.streamDelegate.output)
         .lineLimit(nil)
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1390,9 +1510,6 @@ struct App: SwiftUI.App {
   }
 }
 
-// MARK: - UI Components - Reusable Components
-
-// MARK: - Simplified UI Components
 // MARK: - UI Components - Reusable Components
 
 struct PopoverSelectorRow<Content: View>: View {
@@ -1796,8 +1913,8 @@ struct OpenAIConfig: Codable, ConfigLoadable {
   static var configPath: URL {
     return FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".config")
-      .appendingPathComponent("chat.swift")
-      .appendingPathComponent("config.json")
+      .appendingPathComponent(AppConstants.configDirectoryName)
+      .appendingPathComponent(AppConstants.mainConfigFileName)
   }
 
   static func load() -> OpenAIConfig {
@@ -1806,7 +1923,7 @@ struct OpenAIConfig: Codable, ConfigLoadable {
 
       if config.getConfig(for: config.defaultModel) == nil {
         print("Warning: Default model '\(config.defaultModel)' not found in config. Falling back.")
-        let fallbackModel = config.allModels.first ?? "gpt-4-turbo-preview"
+        let fallbackModel = config.allModels.first ?? AppConstants.DefaultModels.openAI
         print("Using fallback model: \(fallbackModel)")
         return OpenAIConfig(models: config.models, legacy: config.legacy, defaultModel: fallbackModel)
       }
@@ -1817,9 +1934,9 @@ struct OpenAIConfig: Codable, ConfigLoadable {
       let defaultModels = [
         "default": ModelConfig(
           baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY",
-          models: ["gpt-4-turbo-preview", "gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)
+          models: [AppConstants.DefaultModels.openAI, "gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)
       ]
-      return OpenAIConfig(models: defaultModels, legacy: nil, defaultModel: "gpt-4-turbo-preview")
+      return OpenAIConfig(models: defaultModels, legacy: nil, defaultModel: AppConstants.DefaultModels.openAI)
     }
   }
 
