@@ -705,15 +705,24 @@ class ChatHistory {
     messageID: String,
     onQueryCompleted: @escaping () -> Void
   ) async {
+    print("🚀 [sendMessage] === START ===")
+    print("🚀 [sendMessage] Message ID: \(messageID)")
+    print("🚀 [sendMessage] Model: \(modelname)")
+    print("🚀 [sendMessage] User text: \(userText ?? "nil")")
+    print("🚀 [sendMessage] Has message content: \(messageContent != nil)")
+    
     let config = OpenAIConfig.load()
     guard let modelConfig = config.getConfig(for: modelname),
           let baseURL = modelConfig.baseURL,
           let apiKey = modelConfig.apiKey else {
-      print("Error: Model configuration not found or incomplete for \(modelname)")
+      print("❌ [sendMessage] Error: Model configuration not found or incomplete for \(modelname)")
       onQueryCompleted()
       return
     }
 
+    print("🚀 [sendMessage] Base URL: \(baseURL)")
+    print("🚀 [sendMessage] API Key: \(apiKey.prefix(10))...")
+    
     let url = URL(string: "\(baseURL)/chat/completions")!
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
@@ -773,15 +782,25 @@ class ChatHistory {
     messagesToSend.append(userMessage)
     saveMessage(userMessage)
 
+    // Extract pure model name without @provider suffix for API request
+    let pureModelName = modelname.split(separator: "@").first.map(String.init) ?? modelname
+    print("🚀 [sendMessage] Using pure model name for API: '\(pureModelName)' (from '\(modelname)')")
+    
     let chatRequest = ChatRequest(
-      model: modelname, messages: messagesToSend, stream: true
+      model: pureModelName, messages: messagesToSend, stream: true
     )
 
+    print("🚀 [sendMessage] Preparing request with \(messagesToSend.count) messages")
+    
     do {
       let encoder = JSONEncoder()
       request.httpBody = try encoder.encode(chatRequest)
+      
+      if let httpBody = request.httpBody, let bodyString = String(data: httpBody, encoding: .utf8) {
+        print("🚀 [sendMessage] Request body preview: \(bodyString.prefix(200))...")
+      }
     } catch {
-      print("Error encoding request: \(error)")
+      print("❌ [sendMessage] Error encoding request: \(error)")
       onQueryCompleted()
       return
     }
@@ -819,16 +838,20 @@ class ChatHistory {
       }
     }
 
+    print("🚀 [sendMessage] Setting up stream delegate...")
     streamDelegate.output = AttributedString("")
     streamDelegate.setModel(modelname)
     streamDelegate.currentMessageID = messageID
     streamDelegate.setQueryCompletionCallback(onQueryCompleted)
 
+    print("🚀 [sendMessage] Creating URLSession and starting task...")
     let session = URLSession(
       configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
     let task = session.dataTask(with: request)
     streamDelegate.currentTask = task
     task.resume()
+    print("🚀 [sendMessage] Task resumed, waiting for response...")
+    print("🚀 [sendMessage] === END ===")
   }
 }
 
@@ -851,6 +874,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   func cancelCurrentQuery() {
+    print("🛑 [cancelCurrentQuery] Cancelling query...")
     currentTask?.cancel()
     DispatchQueue.main.async {
       self.output = AttributedString("")
@@ -862,7 +886,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
     }
     self.currentTask = nil
     self.currentMessageID = nil
-    print("Query cancelled and StreamDelegate state reset.")
+    print("🛑 [cancelCurrentQuery] Query cancelled and StreamDelegate state reset.")
   }
 
   func setQueryCompletionCallback(_ callback: @escaping () -> Void) {
@@ -925,12 +949,15 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-    // print(dataTask, currentMessageID)
+    print("📥 [didReceive] Received \(data.count) bytes, Message ID: \(currentMessageID ?? "nil")")
+    
     guard currentTask == dataTask, currentMessageID != nil else {
+      print("⚠️ [didReceive] Ignoring data - task mismatch or no message ID")
       return
     }
 
     if let text = String(data: data, encoding: .utf8) {
+      print("📥 [didReceive] Data text preview: \(text.prefix(100))...")
       if let response = dataTask.response as? HTTPURLResponse,
         response.statusCode >= 400
       {
@@ -964,9 +991,11 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
 
   private func processLines(_ lines: [String]) {
     for line in lines {
+      print("🔄 [processLines] Processing line: \(line.prefix(100))...")
       if line.hasPrefix("data: ") {
         // Handle [DONE] marker
         if line.contains("data: [DONE]") {
+          print("✅ [processLines] Received [DONE] marker")
           let finalResponse = currentResponse
           DispatchQueue.main.async {
             if !finalResponse.isEmpty {
@@ -1011,6 +1040,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
             }
 
             if !contentChunk.isEmpty {
+              print("✨ [processLines] Got content chunk (\(isChunkReasoning ? "reasoning" : "normal")): \(contentChunk.prefix(50))...")
               DispatchQueue.main.async { [contentChunk, isChunkReasoning] in
                 guard self.currentMessageID != nil else { return }
 
@@ -1049,6 +1079,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       }
     }
   }
+
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     guard currentTask == task && currentMessageID != nil else {
@@ -1180,15 +1211,19 @@ struct App: SwiftUI.App {
     HStack {
       Button(action: {
         if isQueryActive {
+          print("🛑 [Button] User manually stopping query")
           streamDelegate.cancelCurrentQuery()
-          // input = ""
+          input = ""  // Clear input when manually stopping
           isQueryActive = false
         } else {
           if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            print("▶️ [Button] User starting query")
             Task {
               await submitInput()
               isQueryActive = true
             }
+          } else {
+            print("⚠️ [Button] Empty input, not starting query")
           }
         }
       }) {
@@ -1210,10 +1245,13 @@ struct App: SwiftUI.App {
         .focused($focused)
         .onSubmit {
           if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            print("⏎ [onSubmit] User submitted input via Enter key")
             Task {
               await submitInput()
               isQueryActive = true
             }
+          } else {
+            print("⚠️ [onSubmit] Empty input, not submitting")
           }
         }
         .onChange(of: speechManager.transcribedText) { _, newValue in
@@ -1277,20 +1315,31 @@ struct App: SwiftUI.App {
   }
 
   private func submitInput() async {
+    print("📤 [submitInput] === START ===")
+    print("📤 [submitInput] Input text: '\(input)'")
+    
     let newMessageID = UUID().uuidString
     self.currentMessageID = newMessageID
 
     let textToSend = self.input
     let fileURLToSend = self.selectedFileURL
 
+    print("📤 [submitInput] Message ID: \(newMessageID)")
+    print("📤 [submitInput] Text to send: '\(textToSend)'")
+    print("📤 [submitInput] Model: \(modelname)")
+    print("📤 [submitInput] Prompt: \(selectedPrompt)")
+    print("📤 [submitInput] Has file: \(fileURLToSend != nil)")
+    
     self.selectedFileURL = nil
     self.selectedFileName = nil
 
     if let url = fileURLToSend {
+      print("📤 [submitInput] Processing file upload...")
       if let contentToSend = await ChatHistory.shared.handleFileUpload(
         fileURL: url,
         associatedText: textToSend
       ) {
+        print("📤 [submitInput] Calling sendMessage with file content...")
         await ChatHistory.shared.sendMessage(
           userText: nil,
           messageContent: contentToSend,
@@ -1301,10 +1350,11 @@ struct App: SwiftUI.App {
           onQueryCompleted: self.queryDidComplete
         )
       } else {
-        print("Error processing file upload, message not sent.")
+        print("❌ [submitInput] Error processing file upload, message not sent.")
         self.queryDidComplete()
       }
     } else if !textToSend.isEmpty {
+      print("📤 [submitInput] Calling sendMessage with text content...")
       await ChatHistory.shared.sendMessage(
         userText: textToSend,
         messageContent: nil,
@@ -1314,12 +1364,16 @@ struct App: SwiftUI.App {
         messageID: newMessageID,
         onQueryCompleted: self.queryDidComplete
       )
+      print("📤 [submitInput] sendMessage call completed")
     } else {
+      print("⚠️ [submitInput] No content to send")
       self.queryDidComplete()
     }
+    print("📤 [submitInput] === END ===")
   }
 
   func queryDidComplete() {
+    print("✅ [queryDidComplete] Query completed, setting isQueryActive to false")
     isQueryActive = false
   }
 
@@ -1770,13 +1824,35 @@ struct OpenAIConfig: Codable, ConfigLoadable {
   }
 
   func getConfig(for model: String) -> ModelConfig? {
-    // Only search in models section, ignore legacy
-    for (_, config) in models {
-      if config.models.contains(model) {
+    print("🔍 [getConfig] Looking up config for model: '\(model)'")
+    
+    // Handle model@provider format
+    let components = model.split(separator: "@")
+    let modelName = String(components.first ?? "")
+    let providerName = components.count > 1 ? String(components.last!) : nil
+    
+    print("🔍 [getConfig] Parsed - model: '\(modelName)', provider: '\(providerName ?? "nil")'")
+    
+    // If provider is specified, look in that provider's config
+    if let provider = providerName, let config = models[provider] {
+      print("🔍 [getConfig] Found provider '\(provider)' config with models: \(config.models)")
+      if config.models.contains(modelName) {
+        print("✅ [getConfig] Found model '\(modelName)' in provider '\(provider)'")
         return config
       }
     }
-    print("Warning: Configuration for model '\(model)' not found.")
+    
+    // Fallback: search all providers for the full model string or just model name
+    print("🔍 [getConfig] Searching all providers...")
+    for (providerKey, config) in models {
+      print("🔍 [getConfig] Checking provider '\(providerKey)': \(config.models)")
+      if config.models.contains(model) || config.models.contains(modelName) {
+        print("✅ [getConfig] Found model in provider '\(providerKey)'")
+        return config
+      }
+    }
+    
+    print("❌ [getConfig] Configuration for model '\(model)' not found in any provider.")
     return nil
   }
 }
