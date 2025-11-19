@@ -20,30 +20,91 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let rightOptionKeyCode: UInt16 = 61
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
-        SFSpeechRecognizer.requestAuthorization { authStatus in
-            if authStatus != .authorized {
-                print("Speech recognition not authorized")
-            }
+        // Configure window appearance
+        NSApplication.shared.setActivationPolicy(.accessory)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        if let window = NSApplication.shared.windows.first {
+            window.level = .floating
+            window.standardWindowButton(.closeButton)?.isHidden = true
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
         }
 
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+        // Check accessibility permissions for global key monitoring
+        let trusted = AXIsProcessTrusted()
+        if !trusted {
+            print("⚠️  Accessibility permission required for global key monitoring")
+            print("⚠️  Please enable in System Settings > Privacy & Security > Accessibility")
+        } else {
+            print("✅ Accessibility permission granted")
+        }
+
+        // Don't request permissions at startup - let them be requested when user first tries to record
+        print("ℹ️  Permissions will be requested when you first use recording feature")
+
+        print("🔧 Setting up event monitors for right Option key (keyCode: \(rightOptionKeyCode))")
+        
+        // Use local event monitor to catch events when app has focus
+        NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { event in
+            print("⌨️  Flags changed: keyCode=\(event.keyCode), modifierFlags=\(event.modifierFlags.rawValue)")
             if event.keyCode == self.rightOptionKeyCode {
-                if event.type == .keyDown {
+                let isPressed = event.modifierFlags.contains(.option)
+                print("✅ Right Option key \(isPressed ? "pressed" : "released")")
+                
+                if isPressed {
                     if !self.isRightOptionDown {
                         self.isRightOptionDown = true
+                        print("📤 Posting rightOptionKeyDown notification (short press)")
                         NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
                         self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
+                            print("📤 Posting rightOptionKeyDown notification (long press)")
                             NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
                         }
                     }
-                } else if event.type == .keyUp {
+                } else {
                     if self.isRightOptionDown {
                         self.isRightOptionDown = false
                         self.keyDownTimer?.invalidate()
+                        print("📤 Posting rightOptionKeyUp notification")
                         NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
                     }
                 }
             }
+            return event
+        }
+        
+        // Also use global monitor for when app doesn't have focus
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { event in
+            print("⌨️  Global flags changed: keyCode=\(event.keyCode)")
+            if event.keyCode == self.rightOptionKeyCode {
+                let isPressed = event.modifierFlags.contains(.option)
+                print("✅ Right Option key \(isPressed ? "pressed" : "released") (global)")
+                
+                if isPressed {
+                    if !self.isRightOptionDown {
+                        self.isRightOptionDown = true
+                        print("📤 Posting rightOptionKeyDown notification (short press)")
+                        NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
+                        self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
+                            print("📤 Posting rightOptionKeyDown notification (long press)")
+                            NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
+                        }
+                    }
+                } else {
+                    if self.isRightOptionDown {
+                        self.isRightOptionDown = false
+                        self.keyDownTimer?.invalidate()
+                        print("📤 Posting rightOptionKeyUp notification")
+                        NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
+                    }
+                }
+            }
+        }
+        
+        if eventMonitor == nil {
+            print("❌ Failed to create global event monitor")
+        } else {
+            print("✅ Event monitors created successfully")
         }
     }
 
@@ -581,7 +642,7 @@ class ChatHistory {
   func loadPromptContent(name: String) -> SystemPrompt? {
     let fileURL = promptsPath.appendingPathComponent("\(name).md")
     do {
-      let content = try String(contentsOf: fileURL)
+      let content = try String(contentsOf: fileURL, encoding: .utf8)
       return SystemPrompt(role: "system", content: content)
     } catch {
       return nil
@@ -1046,6 +1107,10 @@ struct App: SwiftUI.App {
   @StateObject private var speechManager = SpeechManager()
   @AppStorage("modelname") public var modelname = OpenAIConfig.getDefaultModel()
   @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
+  @State private var isRightOptionDown = false
+  @State private var initialInputText = ""
+  @State private var insertionIndex = 0
+
   @FocusState private var focused: Bool
   @State private var selectedFileURL: URL? = nil
   @State private var selectedFileName: String? = nil
@@ -1089,18 +1154,21 @@ struct App: SwiftUI.App {
         focused = true
       }
       .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyDown)) { notification in
+          print("🎤 Right Option key down detected")
           guard let isLongPress = notification.userInfo?["isLongPress"] as? Bool else { return }
-          if !isLongPress {
-              if !speechManager.isRecording {
-                  speechManager.startRecording()
-              }
-          } else {
-              speechManager.startRecognition()
+          // Ignore long press for now - just start recording on any press
+          if !speechManager.isRecording {
+              print("🎤 Starting recording")
+              speechManager.startRecording()
           }
       }
       .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyUp)) { _ in
-          if speechManager.isRecording {
-              speechManager.stopRecording()
+          print("🎤 Right Option key up detected")
+          Task { @MainActor in
+              if speechManager.isRecording {
+                  print("🎤 Stopping recording")
+                  speechManager.stopRecording()
+              }
           }
       }
     }
@@ -1149,10 +1217,63 @@ struct App: SwiftUI.App {
           }
         }
         .onChange(of: speechManager.transcribedText) { _, newValue in
-            input = newValue
+            if !newValue.isEmpty {
+                // Insert at the captured cursor position
+                let prefix = String(initialInputText.prefix(insertionIndex))
+                let suffix = String(initialInputText.suffix(initialInputText.count - insertionIndex))
+                input = prefix + newValue + suffix
+                
+                // Calculate the new cursor position (after the inserted text)
+                let newCursorPosition = insertionIndex + newValue.count
+                
+                // Use DispatchQueue to defer cursor update until after SwiftUI updates the TextField
+                DispatchQueue.main.async {
+                    // Access the underlying NSTextView to set cursor position
+                    if let window = NSApplication.shared.keyWindow,
+                       let textView = window.firstResponder as? NSTextView {
+                        // Set the selected range to position cursor after the inserted text
+                        // selectedRange is an NSRange with location and length
+                        // For a cursor position (no selection), length = 0
+                        let range = NSRange(location: min(newCursorPosition, input.count), length: 0)
+                        textView.setSelectedRange(range)
+                        print("📍 Cursor positioned at: \(newCursorPosition)")
+                    }
+                }
+            }
         }
     }
     .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+    .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyDown)) { notification in
+        print("🎤 Right Option key down detected")
+        guard let isLongPress = notification.userInfo?["isLongPress"] as? Bool else { return }
+        // Ignore long press for now - just start recording on any press
+        if !speechManager.isRecording {
+            print("🎤 Starting recording")
+            
+            // Capture current input and cursor position
+            initialInputText = input
+            
+            // Try to get cursor position from the underlying NSTextView
+            if let window = NSApplication.shared.keyWindow,
+               let textView = window.firstResponder as? NSTextView {
+                // Use the selected range's location
+                // Note: This is an NSRange location (UTF-16 code units)
+                // We need to be careful mapping this to Swift String index if there are emojis
+                // For simplicity, we'll clamp it to the string count
+                let range = textView.selectedRange()
+                // Convert NSRange location to String index offset safely
+                // This is a simplification; for complex emojis it might need more robust handling
+                // but for a basic implementation it usually works fine as long as we don't split graphemes
+                insertionIndex = min(max(0, range.location), input.count)
+            } else {
+                // Fallback to appending
+                insertionIndex = input.count
+            }
+            
+            print("📍 Insertion index: \(insertionIndex)")
+            speechManager.startRecording()
+        }
+    }
   }
 
   private func submitInput() async {
@@ -1218,42 +1339,78 @@ struct App: SwiftUI.App {
 // MARK: - UI Components - Reusable Components
 
 // MARK: - Simplified UI Components
+// MARK: - UI Components - Reusable Components
 
-struct AppPopover<T: Hashable & CustomStringConvertible>: View {
+struct PopoverSelectorRow<Content: View>: View {
+  let label: () -> Content
+  let isSelected: Bool
+  let onTap: () -> Void
+  @State private var isHovering = false
+  var body: some View {
+    Button(action: onTap) {
+      label()
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+          Group {
+            if isSelected {
+              Color.accentColor.opacity(0.18)
+            } else if isHovering {
+              Color.primary.opacity(0.07)
+            } else {
+              Color.clear
+            }
+          }
+        )
+        .cornerRadius(6)
+    }
+    .buttonStyle(PlainButtonStyle())
+    .onHover { hover in
+      isHovering = hover
+    }
+  }
+}
+
+struct PopoverSelector<T: Hashable & CustomStringConvertible>: View {
   @Binding var selection: T
   let options: [T]
-  let icon: String
-  let showText: Bool
+  let label: () -> AnyView
   @State private var showPopover = false
 
   var body: some View {
     Button(action: { showPopover.toggle() }) {
-      HStack(spacing: 6) {
-        Text(icon).font(.system(size: 12))
-        if showText && !selection.description.isEmpty {
-          Text(selection.description).font(.system(size: 12)).foregroundColor(.primary)
-        }
-      }.padding(.horizontal, 2)
+      label()
     }
     .buttonStyle(PlainButtonStyle())
     .popover(isPresented: $showPopover) {
-      VStack(alignment: .leading, spacing: 0) {
-        ForEach(options, id: \.self) { option in
-          Button(action: { selection = option; showPopover = false }) {
-            HStack {
-              Text(option.description)
-                .foregroundColor(selection == option ? .accentColor : .primary)
-              if selection == option {
-                Image(systemName: "checkmark").foregroundColor(.accentColor)
+      ScrollView {
+        VStack(alignment: .leading, spacing: 4) {
+          ForEach(options, id: \.self) { option in
+            PopoverSelectorRow(
+              label: {
+                AnyView(
+                  HStack {
+                    Text(option.description).font(.system(size: 12))
+                      .foregroundColor(selection == option ? .accentColor : .primary)
+                    Spacer()
+                    if selection == option {
+                      Image(systemName: "checkmark")
+                        .foregroundColor(.accentColor)
+                    }
+                  }
+                )
+              },
+              isSelected: selection == option,
+              onTap: {
+                selection = option
+                showPopover = false
               }
-            }
-            .padding(.vertical, 6).padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selection == option ? Color.accentColor.opacity(0.18) : Color.clear)
-            .cornerRadius(6)
-          }.buttonStyle(PlainButtonStyle())
+            )
+          }
         }
-      }.popoverStyle()
+        .padding(10)
+      }
     }
   }
 }
@@ -1261,20 +1418,74 @@ struct AppPopover<T: Hashable & CustomStringConvertible>: View {
 // MARK: - UI Components - Menu Views
 
 struct ModelMenuView: View {
-  @Binding var modelname: String
-  @State private var models: [String] = []
+  @Binding public var modelname: String
+  @State private var modelProviderMap: [(model: String, provider: String, fullName: String)]
+  @State private var showPopover = false
   
-  var body: some View {
-    AppPopover(selection: $modelname, options: models, icon: "🧠", showText: true)
-      .task {
-        await loadModels()
+  init(modelname: Binding<String>) {
+    self._modelname = modelname
+    
+    // Load models synchronously during initialization
+    let config = OpenAIConfig.load()
+    var tempMap: [(model: String, provider: String, fullName: String)] = []
+    
+    print("🔍 Loading models from config. Providers found: \(config.models.keys.joined(separator: ", "))")
+    
+    for (providerKey, modelConfig) in config.models {
+      print("  Provider '\(providerKey)' has \(modelConfig.models.count) models")
+      for model in modelConfig.models {
+        let fullName = "\(model)@\(providerKey)"
+        tempMap.append((model: model, provider: providerKey, fullName: fullName))
       }
+    }
+    
+    self._modelProviderMap = State(initialValue: tempMap.sorted { $0.model < $1.model })
+    print("✅ Loaded \(tempMap.count) models total in init()")
   }
   
-  private func loadModels() async {
-    await MainActor.run {
-      let config = OpenAIConfig.load()
-      models = config.allModels
+  var body: some View {
+    Button(action: { showPopover.toggle() }) {
+      HStack(spacing: 6) {
+        Text("\u{1F9E0}").font(.system(size: 14))
+        // Display only the model name part (without @provider)
+        let displayName = modelname.components(separatedBy: "@").first ?? modelname
+        Text(displayName).font(.system(size: 12)).foregroundColor(.primary)
+      }
+      .padding(.horizontal, 2)
+    }
+    .buttonStyle(PlainButtonStyle())
+    .popover(isPresented: $showPopover) {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 0) {
+          ForEach(modelProviderMap, id: \.fullName) { item in
+            Button(action: {
+              modelname = item.fullName
+              showPopover = false
+            }) {
+              HStack {
+                Text(item.model).font(.system(size: 12))
+                  .foregroundColor(modelname == item.fullName ? .accentColor : .primary)
+                Spacer()
+                Text(item.provider)
+                  .font(.system(size: 10))
+                  .foregroundColor(.secondary)
+                if modelname == item.fullName {
+                  Image(systemName: "checkmark")
+                    .foregroundColor(.accentColor)
+                    .padding(.leading, 4)
+                }
+              }
+              .padding(.vertical, 6).padding(.horizontal, 10)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .background(modelname == item.fullName ? Color.accentColor.opacity(0.18) : Color.clear)
+              .cornerRadius(6)
+            }
+            .buttonStyle(PlainButtonStyle())
+          }
+        }
+        .padding(10)
+      }
+      .frame(minWidth: 250, maxHeight: 500)
     }
   }
 }
@@ -1284,12 +1495,28 @@ struct PromptMenuView: View {
   @State private var prompts: [String] = ["None"]
 
   var body: some View {
-    AppPopover(selection: $selectedPrompt, options: prompts, icon: "📄", showText: selectedPrompt != "None")
-      .task {
-        let available = await ChatHistory.shared.getAvailablePrompts()
-        prompts = ["None"] + available
-        if !prompts.contains(selectedPrompt) { selectedPrompt = "None" }
+    PopoverSelector(
+      selection: $selectedPrompt, options: prompts,
+      label: {
+        AnyView(
+          HStack(spacing: 6) {
+            Text("📄").font(.system(size: 14))
+            if selectedPrompt != "None" {
+              Text(selectedPrompt).font(.system(size: 12)).foregroundColor(.primary)
+            }
+          }
+          .padding(.horizontal, 2)
+        )
       }
+    )
+    .frame(alignment: .trailing)
+    .task {
+      let availablePrompts = await ChatHistory.shared.getAvailablePrompts()
+      prompts = ["None"] + availablePrompts
+      if !prompts.contains(selectedPrompt) {
+        selectedPrompt = "None"
+      }
+    }
   }
 }
 
