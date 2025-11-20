@@ -620,6 +620,14 @@ class ChatHistory {
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+    
+    // Add custom headers from config
+    if let customHeaders = modelConfig.headers {
+      for (key, value) in customHeaders {
+        request.setValue(value, forHTTPHeaderField: key)
+        Logger.network("sendMessage").debug("Adding custom header: \(key) = \(value)")
+      }
+    }
 
     var messagesToSend: [ChatMessage] = []
 
@@ -2114,6 +2122,7 @@ struct ModelConfig: Codable {
   let models: [String]
   let proxyEnabled: Bool?
   let proxyURL: String?
+  let headers: [String: String]?
 }
 
 struct OpenAIConfig: Codable, ConfigLoadable {
@@ -2150,7 +2159,7 @@ struct OpenAIConfig: Codable, ConfigLoadable {
       let defaultModels = [
         "default": ModelConfig(
           baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY",
-          models: [AppConstants.DefaultModels.openAI, "gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil)
+          models: [AppConstants.DefaultModels.openAI, "gpt-3.5-turbo"], proxyEnabled: false, proxyURL: nil, headers: nil)
       ]
       return OpenAIConfig(models: defaultModels, legacy: nil, defaultModel: AppConstants.DefaultModels.openAI)
     }

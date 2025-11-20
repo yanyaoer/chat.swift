@@ -12,7 +12,10 @@ let package = Package(
   targets: [
     .executableTarget(
       name: "chat.swift",
-      path: "Sources/ChatApp"
+      path: "Sources/ChatApp",
+      swiftSettings: [
+        .unsafeFlags(["-Xfrontend", "-disable-round-trip-debug-types"])
+      ]
     )
   ]
 )
