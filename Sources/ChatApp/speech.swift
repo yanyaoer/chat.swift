@@ -80,14 +80,17 @@ class SpeechManager: ObservableObject, @unchecked Sendable {
         let recordingFormat = inputNode.outputFormat(forBus: 0)
 
         // Install tap - this callback runs on a background audio thread
-        // Note: AVAudioPCMBuffer is not Sendable but safe here because:
-        // 1. It's only used within this callback's scope
-        // 2. We immediately pass it to recognitionRequest on stateQueue
+        // Note: AVAudioPCMBuffer is not Sendable, so we wrap it in an unchecked Sendable struct
+        struct SendableAudioBuffer: @unchecked Sendable {
+            let buffer: AVAudioPCMBuffer
+        }
+        
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] (buffer, _) in
             guard let self = self else { return }
+            let sendableBuffer = SendableAudioBuffer(buffer: buffer)
             // Access recognitionRequest on stateQueue for thread safety
             self.stateQueue.async {
-                self.recognitionRequest?.append(buffer)
+                self.recognitionRequest?.append(sendableBuffer.buffer)
             }
         }
 
@@ -147,7 +150,12 @@ class SpeechManager: ObservableObject, @unchecked Sendable {
     
     private func listAudioInputDevices() {
         #if os(macOS)
-        let devices = AVCaptureDevice.devices(for: .audio)
+        let discoverySession = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInMicrophone],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        let devices = discoverySession.devices
         if devices.isEmpty {
             Logger.asr("listAudioInputDevices").warning("没有找到音频输入设备")
         } else {

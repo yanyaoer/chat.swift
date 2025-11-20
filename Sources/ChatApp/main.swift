@@ -595,7 +595,7 @@ class ChatHistory {
     selectedPrompt: String,
     streamDelegate: StreamDelegate,
     messageID: String,
-    onQueryCompleted: @escaping () -> Void
+    onQueryCompleted: @escaping @Sendable () -> Void
   ) async {
     Logger.network("sendMessage").info("=== START ===")
     Logger.network("sendMessage").info("Message ID: \(messageID)")
@@ -820,7 +820,7 @@ class ChatHistory {
 
 // MARK: - Network Layer
 
-final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable
+class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable
 {
   @Published var output: AttributedString = ""
   private var currentResponse: String = ""
@@ -830,11 +830,17 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   private var dataBuffer: String = ""  // Buffer for incomplete streaming data
   var currentTask: URLSessionDataTask?
   var currentMessageID: String?
-  var onQueryCompleted: (() -> Void)?
+  var onQueryCompleted: (@Sendable () -> Void)?
+  var isHandlingDone: Bool = false
 
   override init() {
     super.init()
   }
+
+  // Hooks for subclasses (e.g. CLI mode)
+  func onStreamContent(_ content: String, isReasoning: Bool) {}
+  func onStreamError(_ error: String) {}
+  func onStreamComplete() {}
 
   func cancelCurrentQuery() {
     Logger.stream("cancelCurrentQuery").info("Cancelling query...")
@@ -845,14 +851,16 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       self.isCurrentlyReasoning = false
       self.pendingMCPCall = ""
       self.dataBuffer = ""
+      self.isHandlingDone = false
       self.onQueryCompleted?()
+      self.onStreamComplete()
     }
     self.currentTask = nil
     self.currentMessageID = nil
     Logger.stream("cancelCurrentQuery").success("Query cancelled and StreamDelegate state reset")
   }
 
-  func setQueryCompletionCallback(_ callback: @escaping () -> Void) {
+  func setQueryCompletionCallback(_ callback: @escaping @Sendable () -> Void) {
     self.onQueryCompleted = callback
   }
 
@@ -860,27 +868,74 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
     currentModel = model
   }
 
-  private func detectAndExecuteMCPCall(_ text: String) async {
+  private func detectAndExecuteMCPCall(_ text: String) async -> Bool {
     Logger.tool("detectAndExecuteMCPCall").debug("Checking text of length \(text.count)")
     Logger.tool("detectAndExecuteMCPCall").debug("Text preview: \(text.suffix(200))")
     let toolCalls = ToolParser.extractToolCalls(from: text)
     Logger.tool("detectAndExecuteMCPCall").info("Found \(toolCalls.count) tool calls in text")
+    
+    var didExecute = false
+    
     for call in toolCalls {
       Logger.tool("detectAndExecuteMCPCall").debug("Tool: \(call.toolName), Complete: \(call.isComplete), Params: \(call.parameters)")
       if call.isComplete && call.toolName == "mcp_call" {
         Logger.tool("detectAndExecuteMCPCall").success("Executing MCP tool")
-        await executeMCPTool(call)
+        let result = await executeMCPTool(call)
+        
+        // Send result back to LLM
+        switch result {
+        case .success(let output):
+            let formatted = formatResult(output)
+            let toolResultMessage = """
+            Tool execution result:
+            \(formatted)
+            """
+            Logger.tool("detectAndExecuteMCPCall").info("Sending tool result back to LLM")
+            
+            // We need to call sendMessage again with the tool result
+            // This creates a multi-turn conversation: User -> Assistant (Tool) -> User (Result) -> Assistant (Answer)
+            if self.currentMessageID != nil {
+                await ChatHistory.shared.sendMessage(
+                    userText: toolResultMessage,
+                    messageContent: nil,
+                    modelname: self.currentModel.isEmpty ? OpenAIConfig.getDefaultModel() : self.currentModel,
+                    selectedPrompt: "", // Don't re-apply prompt
+                    streamDelegate: self, // Reuse delegate
+                    messageID: UUID().uuidString, // New ID for the new turn
+                    onQueryCompleted: self.onQueryCompleted ?? {} // Pass original completion handler
+                )
+                didExecute = true
+            }
+            
+        case .failure(let error):
+            let errorMessage = "Tool execution failed: \(error.localizedDescription)"
+            Logger.tool("detectAndExecuteMCPCall").error("Sending error back to LLM")
+            
+            if self.currentMessageID != nil {
+                await ChatHistory.shared.sendMessage(
+                    userText: errorMessage,
+                    messageContent: nil,
+                    modelname: self.currentModel.isEmpty ? OpenAIConfig.getDefaultModel() : self.currentModel,
+                    selectedPrompt: "",
+                    streamDelegate: self,
+                    messageID: UUID().uuidString,
+                    onQueryCompleted: self.onQueryCompleted ?? {}
+                )
+                didExecute = true
+            }
+        }
       } else if !call.isComplete {
         Logger.tool("detectAndExecuteMCPCall").info("Tool call incomplete, waiting for more data")
       }
     }
+    return didExecute
   }
   
-  private func executeMCPTool(_ call: ToolCall) async {
+  private func executeMCPTool(_ call: ToolCall) async -> Result<String, AppError> {
     guard let server = call.parameters["server"],
           let tool = call.parameters["tool"] else { 
       Logger.tool("executeMCPTool").error("Missing server or tool parameter")
-      return 
+      return .failure(.mcpError("Missing server or tool parameter")) 
     }
     
     Logger.tool("executeMCPTool").info("Server: \(server), Tool: \(tool)")
@@ -947,10 +1002,12 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         Logger.tool("executeMCPTool").debug("Formatted output length: \(formatted.count)")
         await updateUI("📋 工具结果", "```\n\(formatted)\n```")
         Logger.tool("executeMCPTool").success("UI updated with result")
+        return .success(output)
     case .failure(let error):
         Logger.tool("executeMCPTool").error("Failure: \(error.localizedDescription)")
         await updateUI("❌ 工具执行失败", error.localizedDescription)
         Logger.tool("executeMCPTool").error("UI updated with error")
+        return .failure(error)
     }
   }
   
@@ -1026,6 +1083,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       if line.contains("data: [DONE]") {
         Logger.stream("processLines").success("Found [DONE] marker, will process after all content")
         isDone = true
+        self.isHandlingDone = true
         continue
       }
 
@@ -1081,6 +1139,9 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       
       self.currentResponse += accumulatedContent
       self.pendingMCPCall += accumulatedContent
+      
+      // Notify hooks
+      self.onStreamContent(accumulatedContent, isReasoning: self.isCurrentlyReasoning)
     }
     
     // Second pass: handle DONE if present
@@ -1092,29 +1153,47 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       DispatchQueue.main.async {
         let completeContent = self.pendingMCPCall
         let messageID = self.currentMessageID
+        
         Logger.stream("processLines").debug("Complete pendingMCPCall length: \(completeContent.count)")
         Logger.stream("processLines").info("Performing final tool detection on complete response")
         
-        // Execute tools BEFORE cleanup, so currentMessageID is still valid
-        Task {
-          await self.detectAndExecuteMCPCall(completeContent)
-          
-          // AFTER tool execution completes, then save and cleanup
-          DispatchQueue.main.async {
-            let finalResponse = self.currentResponse
-            if !finalResponse.isEmpty {
-              let assistantMessage = ChatMessage(
-                role: "assistant", content: .text(finalResponse), model: self.currentModel,
+        // 1. Save the Assistant Message (Tool Call) immediately
+        if !self.currentResponse.isEmpty {
+             let assistantMessage = ChatMessage(
+                role: "assistant", content: .text(self.currentResponse), model: self.currentModel,
                 id: messageID)
-              ChatHistory.shared.saveMessage(assistantMessage)
+             ChatHistory.shared.saveMessage(assistantMessage)
+        }
+        
+        // 2. Reset buffers that belong to the OLD request
+        // We do this BEFORE tool execution because if a new query starts, it needs fresh buffers.
+        self.currentResponse = ""
+        self.pendingMCPCall = ""
+        self.dataBuffer = ""
+        self.isCurrentlyReasoning = false
+        
+        // 3. Execute Tools
+        Task {
+          let didTriggerNewQuery = await self.detectAndExecuteMCPCall(completeContent)
+          
+          // 4. Handle Task State
+          DispatchQueue.main.async {
+            if didTriggerNewQuery {
+                // New query is running.
+                // currentMessageID and currentTask are already set for the NEW query (by sendMessage inside detectAndExecuteMCPCall).
+                // Do NOT clear them.
+                Logger.stream("processLines").info("Tool execution triggered new query. Keeping task state active.")
+            } else {
+                // No new query. Clean up task state.
+                self.currentTask = nil
+                self.currentMessageID = nil
+                self.onQueryCompleted?()
+                self.onStreamComplete()
+                Logger.stream("processLines").info("Query finished without new triggers. Cleared task state.")
             }
-            self.currentResponse = ""
-            self.isCurrentlyReasoning = false
-            self.pendingMCPCall = ""
-            self.dataBuffer = ""
-            self.currentTask = nil
-            self.currentMessageID = nil
-            self.onQueryCompleted?()
+            
+            // Reset the flag that prevents didCompleteWithError from interfering
+            self.isHandlingDone = false
           }
         }
       }
@@ -1140,15 +1219,22 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
           var errorChunk = AttributedString("\nNetwork Error: \(error.localizedDescription)")
           errorChunk.foregroundColor = .red
           self.output += errorChunk
+          self.onStreamError(error.localizedDescription)
         }
         self.isCurrentlyReasoning = false
         self.pendingMCPCall = ""
         self.dataBuffer = ""
         self.onQueryCompleted?()
+        self.onStreamComplete()
       }
     } else {
       // Only save if not already saved in [DONE] handler
       DispatchQueue.main.async {
+        if self.isHandlingDone {
+            Logger.stream("didCompleteWithError").info("Deferring completion to [DONE] handler")
+            return
+        }
+        
         if !self.currentResponse.isEmpty {
           let assistantMessage = ChatMessage(
             role: "assistant", content: .text(self.currentResponse), model: self.currentModel,
@@ -1159,11 +1245,12 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         self.isCurrentlyReasoning = false
         self.pendingMCPCall = ""
         self.dataBuffer = ""
+        self.currentTask = nil
+        self.currentMessageID = nil
         self.onQueryCompleted?()
+        self.onStreamComplete()
       }
     }
-    self.currentTask = nil
-    self.currentMessageID = nil
   }
 }
 
@@ -1284,11 +1371,11 @@ final class ChatViewModel: ObservableObject {
           selectedPrompt: selectedPrompt,
           streamDelegate: streamDelegate,
           messageID: newMessageID,
-          onQueryCompleted: self.queryDidComplete
+          onQueryCompleted: { Task { await MainActor.run { self.queryDidComplete() } } }
         )
       } else {
         Logger.input("submitInput").error("Error processing file upload, message not sent")
-        self.queryDidComplete()
+        Task { await MainActor.run { self.queryDidComplete() } }
       }
     } else if !textToSend.isEmpty {
       Logger.input("submitInput").info("Calling sendMessage with text content...")
@@ -1299,7 +1386,7 @@ final class ChatViewModel: ObservableObject {
         selectedPrompt: selectedPrompt,
         streamDelegate: streamDelegate,
         messageID: newMessageID,
-        onQueryCompleted: self.queryDidComplete
+        onQueryCompleted: { Task { await MainActor.run { self.queryDidComplete() } } }
       )
       Logger.input("submitInput").success("sendMessage call completed")
     } else {
@@ -1393,6 +1480,21 @@ struct App: SwiftUI.App {
         focused = true
         viewModel.modelname = modelname
         viewModel.selectedPrompt = selectedPrompt
+        
+        // Check for auto-submit prompt
+        if let autoPrompt = UserDefaults.standard.string(forKey: "autoSubmitPrompt") {
+            // Clear the flag immediately
+            UserDefaults.standard.removeObject(forKey: "autoSubmitPrompt")
+            
+            // Set input and submit after a short delay to ensure UI is ready
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                viewModel.input = autoPrompt
+                Task {
+                    viewModel.isQueryActive = true
+                    await viewModel.submitInput()
+                }
+            }
+        }
       }
       .onChange(of: modelname) { _, newValue in
         viewModel.modelname = newValue
@@ -2090,4 +2192,167 @@ struct OpenAIConfig: Codable, ConfigLoadable {
 
 // MARK: - Application Entry Point
 
-App.main()
+// MARK: - CLI Mode Support
+
+enum RunMode {
+    case cli(String)           // CLI mode with prompt
+    case guiWithPrompt(String) // GUI mode with auto-submit prompt
+    case gui                   // Normal GUI mode
+}
+
+struct CLIArguments {
+    var runMode: RunMode = .gui
+    var showHelp: Bool = false
+    
+    static func parse() -> CLIArguments {
+        let args = CommandLine.arguments
+        var result = CLIArguments()
+        
+        // Check for help flag first
+        if args.contains("-h") || args.contains("--help") {
+            result.showHelp = true
+            return result
+        }
+        
+        // Parse arguments
+        var i = 1
+        while i < args.count {
+            let arg = args[i]
+            
+            if arg == "-p" || arg == "--prompt" {
+                // CLI mode: -p flag followed by prompt
+                if i + 1 < args.count {
+                    result.runMode = .cli(args[i + 1])
+                    return result
+                }
+            } else if !arg.hasPrefix("-") {
+                // GUI mode with auto-submit: prompt without flag
+                result.runMode = .guiWithPrompt(arg)
+                return result
+            }
+            i += 1
+        }
+        
+        return result
+    }
+    
+    static func printHelp() {
+        print("""
+        chat.swift - AI Chat Application
+        
+        USAGE:
+            chat.swift [OPTIONS] [PROMPT]
+            
+        OPTIONS:
+            -p, --prompt <text>    Run in CLI mode with the given prompt (output to stdout)
+            -h, --help             Show this help message
+            
+        ARGUMENTS:
+            PROMPT                 Launch GUI and auto-submit the prompt
+            
+        EXAMPLES:
+            # CLI mode (output to stdout, logs to file)
+            chat.swift -p '@amap 北京的天气'
+            
+            # GUI mode with auto-submit
+            chat.swift '@amap 北京的天气'
+            
+            # Normal GUI mode
+            chat.swift
+        """)
+    }
+}
+
+@MainActor
+func runCLIMode(prompt: String) async {
+    // Enable file logging
+    Logger.enableFileLogging()
+    
+    Logger.app("CLI").info("Starting CLI mode")
+    Logger.app("CLI").info("Prompt: \(prompt)")
+    
+    // Load configuration
+    let config = OpenAIConfig.load()
+    let modelName = UserDefaults.standard.string(forKey: AppConstants.UserDefaults.modelName) 
+        ?? config.defaultModel
+    
+    // Create a simple stream delegate that outputs to stdout
+    class CLIStreamDelegate: StreamDelegate, @unchecked Sendable {
+        override func onStreamContent(_ content: String, isReasoning: Bool) {
+            // Output directly to stdout (not using Logger)
+            print(content, terminator: "")
+            fflush(stdout)
+        }
+        
+        override func onStreamComplete() {
+            print("")  // Final newline
+        }
+        
+        override func onStreamError(_ error: String) {
+            // Errors still go to log file
+            Logger.network("CLI").error("Stream error: \(error)")
+        }
+    }
+    
+    let streamDelegate = CLIStreamDelegate()
+    let messageID = UUID().uuidString
+    
+    // Initialize MCP manager if needed
+    MCPManager.shared.loadConfig()
+    
+    // Send the message
+    await ChatHistory.shared.sendMessage(
+        userText: prompt,
+        messageContent: nil,
+        modelname: modelName,
+        selectedPrompt: "",
+        streamDelegate: streamDelegate,
+        messageID: messageID,
+        onQueryCompleted: {
+            Logger.app("CLI").info("Query completed")
+            // Shutdown MCP connections
+            Task {
+                await MCPManager.shared.shutdown()
+                Logger.shutdown()
+                exit(0)
+            }
+        }
+    )
+    
+    // Keep the program alive until completion
+    while true {
+        try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s
+    }
+}
+
+// MARK: - Application Entry Point
+
+let cliArgs = CLIArguments.parse()
+
+switch cliArgs.runMode {
+case .cli(_) where cliArgs.showHelp:
+    CLIArguments.printHelp()
+    exit(0)
+    
+case .cli(let prompt):
+    // CLI mode: output to stdout, logs to file
+    Task {
+        await runCLIMode(prompt: prompt)
+    }
+    dispatchMain()
+    
+case .guiWithPrompt(let prompt):
+    // GUI mode with auto-submit prompt
+    // Store the prompt in UserDefaults for the GUI to pick up
+    UserDefaults.standard.set(prompt, forKey: "autoSubmitPrompt")
+    App.main()
+    
+case .gui:
+    if cliArgs.showHelp {
+        CLIArguments.printHelp()
+        exit(0)
+    } else {
+        // Normal GUI mode
+        App.main()
+    }
+}

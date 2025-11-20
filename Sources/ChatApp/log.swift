@@ -64,9 +64,85 @@ struct Logger {
     private let event: LogEvent
     private let context: String?
     
+    // Output mode configuration
+    enum OutputMode {
+        case console  // Default GUI mode - logs to console
+        case file     // CLI mode - logs to file
+    }
+    
+    // Thread-safe storage for global logger state
+    private final class LogStorage: @unchecked Sendable {
+        static let shared = LogStorage()
+        private let queue = DispatchQueue(label: "com.chatswift.logger.storage")
+        private var _outputMode: OutputMode = .console
+        private var _logFileHandle: FileHandle?
+        
+        var outputMode: OutputMode {
+            get { queue.sync { _outputMode } }
+            set { queue.sync { _outputMode = newValue } }
+        }
+        
+        func setFileHandle(_ handle: FileHandle?) {
+            queue.sync { _logFileHandle = handle }
+        }
+        
+        func writeToFile(_ data: Data) {
+            queue.sync {
+                _logFileHandle?.write(data)
+            }
+        }
+        
+        func closeFile() {
+            queue.sync {
+                _logFileHandle?.closeFile()
+                _logFileHandle = nil
+            }
+        }
+    }
+
+    static var outputMode: OutputMode {
+        get { LogStorage.shared.outputMode }
+        set { LogStorage.shared.outputMode = newValue }
+    }
+    
     init(event: LogEvent, context: String? = nil) {
         self.event = event
         self.context = context
+    }
+    
+    // Enable file logging for CLI mode
+    static func enableFileLogging() {
+        let configPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config")
+            .appendingPathComponent("chat.swift")
+        
+        // Create directory if needed
+        try? FileManager.default.createDirectory(at: configPath, withIntermediateDirectories: true)
+        
+        let logFilePath = configPath.appendingPathComponent("main.log")
+        
+        // Create or open log file
+        if !FileManager.default.fileExists(atPath: logFilePath.path) {
+            FileManager.default.createFile(atPath: logFilePath.path, contents: nil)
+        }
+        
+        if let handle = try? FileHandle(forWritingTo: logFilePath) {
+            handle.seekToEndOfFile()
+            LogStorage.shared.setFileHandle(handle)
+            LogStorage.shared.outputMode = .file
+            
+            // Write session separator
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let separator = "\n=== Session started at \(timestamp) ===\n"
+            if let data = separator.data(using: .utf8) {
+                LogStorage.shared.writeToFile(data)
+            }
+        }
+    }
+    
+    // Cleanup file handle on shutdown
+    static func shutdown() {
+        LogStorage.shared.closeFile()
     }
     
     func info(_ message: String) {
@@ -91,7 +167,20 @@ struct Logger {
     
     private func log(level: String, emoji: String, message: String) {
         let contextStr = context.map { " [\($0)]" } ?? ""
-        print("\(emoji) [\(event.rawValue)]\(contextStr) \(message)")
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let logMessage = "[\(timestamp)] \(emoji) [\(event.rawValue)]\(contextStr) \(message)\n"
+        
+        switch Logger.outputMode {
+        case .console:
+            // GUI mode - print to console without timestamp
+            print("\(emoji) [\(event.rawValue)]\(contextStr) \(message)")
+            
+        case .file:
+            // CLI mode - write to file with timestamp
+            if let data = logMessage.data(using: .utf8) {
+                LogStorage.shared.writeToFile(data)
+            }
+        }
     }
 }
 

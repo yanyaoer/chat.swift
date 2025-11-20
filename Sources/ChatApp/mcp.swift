@@ -275,7 +275,7 @@ actor MCPConnection {
     isInitialized = false
     
     // Cancel all pending requests
-    for (id, continuation) in pendingRequests {
+    for (_, continuation) in pendingRequests {
       continuation.resume(throwing: AppError.mcpError("Connection terminated"))
     }
     pendingRequests.removeAll()
@@ -364,10 +364,10 @@ class MCPManager: ObservableObject {
   private var activeConnections: [String: MCPConnection] = [:]
 
   private init() {
-    loadMCPConfig()
+    loadConfig()
   }
 
-  private func loadMCPConfig() {
+  func loadConfig() {
     do {
       let config = try MCPConfig.loadConfig(MCPConfig.self)
       mcpServers = config.mcpServers
@@ -527,16 +527,32 @@ class MCPManager: ObservableObject {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         
-        // Use a serial queue for thread-safe data accumulation
-        let dataQueue = DispatchQueue(label: "com.chatapp.mcp.dataqueue")
-        var outputData = Data()
+        // Thread-safe state holder
+        class FetchState: @unchecked Sendable {
+            private var outputData = Data()
+            private let queue = DispatchQueue(label: "com.chatapp.mcp.dataqueue")
+            
+            func append(_ data: Data) {
+                queue.sync {
+                    outputData.append(data)
+                }
+            }
+            
+            func getData() -> Data {
+                queue.sync { outputData }
+            }
+            
+            func isEmpty() -> Bool {
+                queue.sync { outputData.isEmpty }
+            }
+        }
+        
+        let state = FetchState()
         
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
           let data = handle.availableData
           if !data.isEmpty {
-            dataQueue.sync {
-              outputData.append(data)
-            }
+            state.append(data)
           }
         }
         
@@ -545,9 +561,9 @@ class MCPManager: ObservableObject {
           outputPipe.fileHandleForReading.readabilityHandler = nil
           
           let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+          let outputData = state.getData()
           
-          dataQueue.sync {
-            if outputData.isEmpty {
+          if outputData.isEmpty {
                 Logger.mcp("fetchTools").warning("No output from local server \(serverName)")
                 if let errorString = String(data: errorData, encoding: .utf8), !errorString.isEmpty {
                     Logger.mcp("fetchTools").warning("Stderr: \(errorString)")
@@ -583,7 +599,6 @@ class MCPManager: ObservableObject {
             } else {
               continuation.resume(returning: .failure(.mcpError("Failed to decode output")))
             }
-          }
         }
         
         do {
@@ -750,6 +765,41 @@ class MCPManager: ObservableObject {
 
     Logger.mcp("callLocalMCPTool").info("Calling tool '\(toolName)' with arguments: \(arguments)")
 
+    // Thread-safe state holder
+    class ProcessState: @unchecked Sendable {
+        private var outputLines: [String] = []
+        private var lineBuffer: String = ""
+        var toolCallId: Int?
+        private let queue = DispatchQueue(label: "com.chatapp.mcp.toolcall")
+        
+        func appendData(_ data: Data) {
+            queue.sync {
+                if let chunk = String(data: data, encoding: .utf8) {
+                    lineBuffer += chunk
+                    while let newlineRange = lineBuffer.range(of: "\n") {
+                        let line = String(lineBuffer[..<newlineRange.lowerBound])
+                        lineBuffer.removeSubrange(...newlineRange.lowerBound)
+                        if !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                            outputLines.append(line)
+                            Logger.mcp("callLocalMCPTool").debug("Received line: \(line.prefix(100))...")
+                        }
+                    }
+                }
+            }
+        }
+        
+        func finalizeAndGetLines() -> [String] {
+            queue.sync {
+                if !lineBuffer.trimmingCharacters(in: .whitespaces).isEmpty {
+                    outputLines.append(lineBuffer)
+                }
+                return outputLines
+            }
+        }
+    }
+    
+    let state = ProcessState()
+
     return await withCheckedContinuation { continuation in
       let process = Process()
       process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -770,30 +820,11 @@ class MCPManager: ObservableObject {
       process.standardInput = inputPipe
       process.standardOutput = outputPipe
       process.standardError = errorPipe
-
-      // Use a serial queue for thread-safe data accumulation and line processing
-      let dataQueue = DispatchQueue(label: "com.chatapp.mcp.toolcall")
-      var outputLines: [String] = []
-      var lineBuffer = ""
-      var isInitialized = false
-      var toolCallId: Int?
       
       outputPipe.fileHandleForReading.readabilityHandler = { handle in
         let data = handle.availableData
-        if !data.isEmpty, let chunk = String(data: data, encoding: .utf8) {
-          dataQueue.sync {
-            lineBuffer += chunk
-            // Process complete lines
-            while let newlineRange = lineBuffer.range(of: "\n") {
-              let line = String(lineBuffer[..<newlineRange.lowerBound])
-              lineBuffer.removeSubrange(...newlineRange.lowerBound)
-              
-              if !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                outputLines.append(line)
-                Logger.mcp("callLocalMCPTool").debug("Received line: \(line.prefix(100))...")
-              }
-            }
-          }
+        if !data.isEmpty {
+            state.appendData(data)
         }
       }
 
@@ -801,60 +832,54 @@ class MCPManager: ObservableObject {
         outputPipe.fileHandleForReading.readabilityHandler = nil
         
         let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        let outputLines = state.finalizeAndGetLines()
         
-        dataQueue.sync {
-          // Add any remaining data in buffer
-          if !lineBuffer.trimmingCharacters(in: .whitespaces).isEmpty {
-            outputLines.append(lineBuffer)
-          }
-          
-          if let errorString = String(data: errorData, encoding: .utf8), !errorString.isEmpty {
-            Logger.mcp("callLocalMCPTool").warning("Stderr: \(errorString)")
-          }
-          
-          if outputLines.isEmpty {
-            Logger.mcp("callLocalMCPTool").error("No output from process")
-            continuation.resume(returning: .failure(.mcpError("No output from MCP tool")))
-            return
-          }
-          
-          Logger.mcp("callLocalMCPTool").info("Processing \(outputLines.count) response lines")
-          
-          // Parse JSON-RPC responses
-          for line in outputLines {
-            if let data = line.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-              
-              // Check for JSON-RPC error
-              if let error = json["error"] as? [String: Any],
-                 let message = error["message"] as? String {
-                Logger.mcp("callLocalMCPTool").error("JSON-RPC Error: \(message)")
-                continuation.resume(returning: .failure(.mcpError("JSON-RPC Error: \(message)")))
+        if let errorString = String(data: errorData, encoding: .utf8), !errorString.isEmpty {
+          Logger.mcp("callLocalMCPTool").warning("Stderr: \(errorString)")
+        }
+        
+        if outputLines.isEmpty {
+          Logger.mcp("callLocalMCPTool").error("No output from process")
+          continuation.resume(returning: .failure(.mcpError("No output from MCP tool")))
+          return
+        }
+        
+        Logger.mcp("callLocalMCPTool").info("Processing \(outputLines.count) response lines")
+        
+        // Parse JSON-RPC responses
+        for line in outputLines {
+          if let data = line.data(using: .utf8),
+             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            
+            // Check for JSON-RPC error
+            if let error = json["error"] as? [String: Any],
+               let message = error["message"] as? String {
+              Logger.mcp("callLocalMCPTool").error("JSON-RPC Error: \(message)")
+              continuation.resume(returning: .failure(.mcpError("JSON-RPC Error: \(message)")))
+              return
+            }
+            
+            // Check if this is the tool call response (matching our ID)
+            if let id = json["id"] as? Int, 
+               let expectedId = state.toolCallId,
+               id == expectedId,
+               let result = json["result"] {
+              if let resultData = try? JSONSerialization.data(withJSONObject: result),
+                 let resultString = String(data: resultData, encoding: .utf8) {
+                Logger.mcp("callLocalMCPTool").success("Tool result: \(resultString.prefix(200))...")
+                continuation.resume(returning: .success(resultString))
                 return
               }
-              
-              // Check if this is the tool call response (matching our ID)
-              if let id = json["id"] as? Int, 
-                 let expectedId = toolCallId,
-                 id == expectedId,
-                 let result = json["result"] {
-                if let resultData = try? JSONSerialization.data(withJSONObject: result),
-                   let resultString = String(data: resultData, encoding: .utf8) {
-                  Logger.mcp("callLocalMCPTool").success("Tool result: \(resultString.prefix(200))...")
-                  continuation.resume(returning: .success(resultString))
-                  return
-                }
-                continuation.resume(returning: .success("\(result)"))
-                return
-              }
+              continuation.resume(returning: .success("\(result)"))
+              return
             }
           }
-          
-          // If no valid tool result found
-          Logger.mcp("callLocalMCPTool").warning("No valid tool result found in responses")
-          let combinedOutput = outputLines.joined(separator: "\n")
-          continuation.resume(returning: .success(combinedOutput))
         }
+        
+        // If no valid tool result found
+        Logger.mcp("callLocalMCPTool").warning("No valid tool result found in responses")
+        let combinedOutput = outputLines.joined(separator: "\n")
+        continuation.resume(returning: .success(combinedOutput))
       }
 
       do {
@@ -862,7 +887,8 @@ class MCPManager: ObservableObject {
         
         // Step 1: Send initialize request (required by MCP protocol)
         let initId = Int.random(in: 1...10000)
-        toolCallId = Int.random(in: 10001...20000)  // Set this early so termination handler can use it
+        let toolCallId = Int.random(in: 10001...20000)
+        state.toolCallId = toolCallId
         
         let initRequest: [String: Any] = [
           "jsonrpc": "2.0",
@@ -903,7 +929,7 @@ class MCPManager: ObservableObject {
         // Step 3: Send the actual tool call
         let toolRequest: [String: Any] = [
           "jsonrpc": "2.0",
-          "id": toolCallId!,
+          "id": toolCallId,
           "method": "tools/call",
           "params": [
             "name": toolName,
@@ -913,7 +939,7 @@ class MCPManager: ObservableObject {
         
         let toolData = try JSONSerialization.data(withJSONObject: toolRequest, options: .prettyPrinted)
         let requestString = String(data: toolData, encoding: .utf8) ?? ""
-        Logger.mcp("callLocalMCPTool").info("Sending tool call request (id: \(toolCallId!)):\n\(requestString)")
+        Logger.mcp("callLocalMCPTool").info("Sending tool call request (id: \(toolCallId)):\n\(requestString)")
         
         inputPipe.fileHandleForWriting.write(toolData)
         inputPipe.fileHandleForWriting.write("\n".data(using: .utf8)!)
