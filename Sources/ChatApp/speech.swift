@@ -31,13 +31,13 @@ class SpeechManager: ObservableObject, @unchecked Sendable {
     }
 
     func startRecording() {
-        print("📱 SpeechManager.startRecording() called")
+        Logger.asr("startRecording").info("SpeechManager.startRecording() called")
         
         // Clear previous transcription
         transcribedText = ""
         
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
-            print("❌ Speech recognizer not available")
+            Logger.asr("startRecording").error("Speech recognizer not available")
             return
         }
 
@@ -47,15 +47,15 @@ class SpeechManager: ObservableObject, @unchecked Sendable {
         // Configure AVAudioSession for recording
         #if os(macOS)
         // macOS doesn't use AVAudioSession, but we need to ensure proper audio setup
-        print("🎙️ Running on macOS - no AVAudioSession needed")
+        Logger.asr("startRecording").info("Running on macOS - no AVAudioSession needed")
         #else
         let audioSession = AVAudioSession.sharedInstance()
         do {
             try audioSession.setCategory(.record, mode: .measurement, options: [])
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-            print("✅ Audio session configured")
+            Logger.asr("startRecording").success("Audio session configured")
         } catch {
-            print("❌ Failed to set up audio session: \(error)")
+            Logger.asr("startRecording").error("Failed to set up audio session: \(error)")
             return
         }
         #endif
@@ -95,13 +95,13 @@ class SpeechManager: ObservableObject, @unchecked Sendable {
 
         do {
             try audioEngine.start()
-            print("✅ Audio engine started successfully")
+            Logger.asr("startRecording").success("Audio engine started successfully")
         } catch {
-            print("❌ Audio engine start error: \(error)")
-            print("⚠️  请检查您的录音设备设置：")
-            print("   1. 打开系统设置 > 声音 > 输入")
-            print("   2. 确认选择了正确的输入设备")
-            print("   3. 确认输入音量不为零")
+            Logger.asr("startRecording").error("Audio engine start error: \(error)")
+            Logger.asr("startRecording").warning("请检查您的录音设备设置：")
+            Logger.asr("startRecording").info("1. 打开系统设置 > 声音 > 输入")
+            Logger.asr("startRecording").info("2. 确认选择了正确的输入设备")
+            Logger.asr("startRecording").info("3. 确认输入音量不为零")
             listAudioInputDevices()
             return
         }
@@ -119,7 +119,7 @@ class SpeechManager: ObservableObject, @unchecked Sendable {
                 // Update @Published property on MainActor
                 Task { @MainActor in
                     self.transcribedText = transcription
-                    print("🎯 Transcribed: \(self.transcribedText)")
+                    Logger.asr("recognitionTask").success("Transcribed: \(self.transcribedText)")
                 }
                 
                 // Stop if final
@@ -129,7 +129,7 @@ class SpeechManager: ObservableObject, @unchecked Sendable {
             }
 
             if let error = error {
-                print("❌ Recognition error: \(error.localizedDescription)")
+                Logger.asr("recognitionTask").error("Recognition error: \(error.localizedDescription)")
                 self.stopRecordingInternal()
             }
         }
@@ -141,7 +141,7 @@ class SpeechManager: ObservableObject, @unchecked Sendable {
         // Update @Published property on MainActor
         Task { @MainActor in
             isRecording = true
-            print("📱 isRecording set to true")
+            Logger.asr("startRecording").info("isRecording set to true")
         }
     }
     
@@ -149,25 +149,25 @@ class SpeechManager: ObservableObject, @unchecked Sendable {
         #if os(macOS)
         let devices = AVCaptureDevice.devices(for: .audio)
         if devices.isEmpty {
-            print("⚠️  没有找到音频输入设备")
+            Logger.asr("listAudioInputDevices").warning("没有找到音频输入设备")
         } else {
-            print("🎙️ 可用的音频输入设备：")
+            Logger.asr("listAudioInputDevices").info("可用的音频输入设备：")
             for (index, device) in devices.enumerated() {
                 let isDefault = device == AVCaptureDevice.default(for: .audio)
                 let marker = isDefault ? "✓ (默认)" : "  "
-                print("   \(marker) \(index + 1). \(device.localizedName)")
+                Logger.asr("listAudioInputDevices").info("   \(marker) \(index + 1). \(device.localizedName)")
             }
         }
         #endif
     }
 
     func stopRecording() {
-        print("📱 Stopping recording...")
+        Logger.asr("stopRecording").info("Stopping recording...")
         stopRecordingInternal()
         // Update @Published property on MainActor
         Task { @MainActor in
             isRecording = false
-            print("✅ Recording stopped")
+            Logger.asr("stopRecording").success("Recording stopped")
         }
     }
     

@@ -34,31 +34,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Check accessibility permissions for global key monitoring
         let trusted = AXIsProcessTrusted()
         if !trusted {
-            print("⚠️  Accessibility permission required for global key monitoring")
-            print("⚠️  Please enable in System Settings > Privacy & Security > Accessibility")
+            Logger.app("AppDelegate").warning("Accessibility permission required for global key monitoring")
+            Logger.app("AppDelegate").warning("Please enable in System Settings > Privacy & Security > Accessibility")
         } else {
-            print("✅ Accessibility permission granted")
+            Logger.app("AppDelegate").success("Accessibility permission granted")
         }
 
         // Don't request permissions at startup - let them be requested when user first tries to record
-        print("ℹ️  Permissions will be requested when you first use recording feature")
+        Logger.app("AppDelegate").info("Permissions will be requested when you first use recording feature")
 
-        print("🔧 Setting up event monitors for right Option key (keyCode: \(rightOptionKeyCode))")
+        Logger.app("AppDelegate").info("Setting up event monitors for right Option key (keyCode: \(rightOptionKeyCode))")
         
         // Use local event monitor to catch events when app has focus
         NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { event in
-            print("⌨️  Flags changed: keyCode=\(event.keyCode), modifierFlags=\(event.modifierFlags.rawValue)")
+            Logger.input("EventMonitor").debug("Flags changed: keyCode=\(event.keyCode), modifierFlags=\(event.modifierFlags.rawValue)")
             if event.keyCode == self.rightOptionKeyCode {
                 let isPressed = event.modifierFlags.contains(.option)
-                print("✅ Right Option key \(isPressed ? "pressed" : "released")")
+                Logger.input("EventMonitor").success("Right Option key \(isPressed ? "pressed" : "released")")
                 
                 if isPressed {
                     if !self.isRightOptionDown {
                         self.isRightOptionDown = true
-                        print("📤 Posting rightOptionKeyDown notification (short press)")
+                        Logger.input("EventMonitor").info("Posting rightOptionKeyDown notification (short press)")
                         NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
                         self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
-                            print("📤 Posting rightOptionKeyDown notification (long press)")
+                            Logger.input("EventMonitor").info("Posting rightOptionKeyDown notification (long press)")
                             NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
                         }
                     }
@@ -66,7 +66,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     if self.isRightOptionDown {
                         self.isRightOptionDown = false
                         self.keyDownTimer?.invalidate()
-                        print("📤 Posting rightOptionKeyUp notification")
+                        Logger.input("EventMonitor").info("Posting rightOptionKeyUp notification")
                         NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
                     }
                 }
@@ -76,18 +76,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Also use global monitor for when app doesn't have focus
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { event in
-            print("⌨️  Global flags changed: keyCode=\(event.keyCode)")
+            Logger.input("GlobalEventMonitor").debug("Global flags changed: keyCode=\(event.keyCode)")
             if event.keyCode == self.rightOptionKeyCode {
                 let isPressed = event.modifierFlags.contains(.option)
-                print("✅ Right Option key \(isPressed ? "pressed" : "released") (global)")
+                Logger.input("GlobalEventMonitor").success("Right Option key \(isPressed ? "pressed" : "released") (global)")
                 
                 if isPressed {
                     if !self.isRightOptionDown {
                         self.isRightOptionDown = true
-                        print("📤 Posting rightOptionKeyDown notification (short press)")
+                        Logger.input("GlobalEventMonitor").info("Posting rightOptionKeyDown notification (short press)")
                         NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
                         self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
-                            print("📤 Posting rightOptionKeyDown notification (long press)")
+                            Logger.input("GlobalEventMonitor").info("Posting rightOptionKeyDown notification (long press)")
                             NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
                         }
                     }
@@ -95,7 +95,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     if self.isRightOptionDown {
                         self.isRightOptionDown = false
                         self.keyDownTimer?.invalidate()
-                        print("📤 Posting rightOptionKeyUp notification")
+                        Logger.input("GlobalEventMonitor").info("Posting rightOptionKeyUp notification")
                         NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
                     }
                 }
@@ -103,9 +103,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         if eventMonitor == nil {
-            print("❌ Failed to create global event monitor")
+            Logger.app("AppDelegate").error("Failed to create global event monitor")
         } else {
-            print("✅ Event monitors created successfully")
+            Logger.app("AppDelegate").success("Event monitors created successfully")
         }
     }
 
@@ -270,61 +270,7 @@ struct ChatRequest: Encodable {
   let stream: Bool
 }
 
-// MARK: - MCP Models
-
-struct MCPServer: Codable {
-  let command: String?
-  let args: [String]?
-  let env: [String: String]?
-  let isActive: Bool?
-  let type: String?
-  let description: String?
-  let url: String?
-  let headers: [String: String]?
-
-  init(
-    command: String? = nil, args: [String]? = nil, env: [String: String]? = nil,
-    isActive: Bool? = nil, type: String? = nil, description: String? = nil,
-    url: String? = nil, headers: [String: String]? = nil
-  ) {
-    self.command = command
-    self.args = args
-    self.env = env
-    self.isActive = isActive
-    self.type = type
-    self.description = description
-    self.url = url
-    self.headers = headers
-  }
-
-  var isRemote: Bool {
-    return type == "http" || type == "sse" || url != nil
-  }
-}
-
-struct MCPConfig: Codable, ConfigLoadable {
-  let mcpServers: [String: MCPServer]
-
-  static var configPath: URL {
-    return FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent(".config")
-      .appendingPathComponent(AppConstants.configDirectoryName)
-      .appendingPathComponent(AppConstants.mcpConfigFileName)
-  }
-}
-
-// MARK: - Configuration Helper
-
-protocol ConfigLoadable {
-  static var configPath: URL { get }
-}
-
-extension ConfigLoadable {
-  static func loadConfig<T: Codable>(_ type: T.Type) throws -> T {
-    let data = try Data(contentsOf: configPath)
-    return try JSONDecoder().decode(type, from: data)
-  }
-}
+// MARK: - Configuration Extensions
 
 extension OpenAIConfig {
   static let safeDefaultModel = AppConstants.DefaultModels.openAI
@@ -334,7 +280,7 @@ extension OpenAIConfig {
       let config = try loadConfig(OpenAIConfig.self)
       return config.defaultModel
     } catch {
-      print("Warning: Could not load config for default model, using safe fallback")
+      Logger.config("OpenAIConfig").warning("Could not load config for default model, using safe fallback")
       return safeDefaultModel
     }
   }
@@ -383,22 +329,28 @@ struct ToolParser {
     // Extract tool name (first XML tag)
     guard let nameMatch = content.range(of: xmlTagPattern, options: .regularExpression),
           let toolName = extractBetween(String(content[nameMatch]), start: "<", end: ">") else {
+      Logger.tool("ToolParser").warning("Could not extract tool name from: \(content.prefix(100))")
       return nil
     }
+    
+    Logger.tool("ToolParser").debug("Extracted tool name: \(toolName)")
     
     // Extract parameters within tool content
     var parameters: [String: String] = [:]
     
     // Find content within the tool tag first
     let toolTagPattern = "<\(toolName)>(.*?)</\(toolName)>"
-    if let toolContentRange = content.range(of: toolTagPattern, options: .regularExpression) {
+    if let regex = try? NSRegularExpression(pattern: toolTagPattern, options: [.dotMatchesLineSeparators]),
+       let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..<content.endIndex, in: content)),
+       match.numberOfRanges >= 2,
+       let toolContentRange = Range(match.range(at: 1), in: content) {
+      
       let toolContent = String(content[toolContentRange])
-        .replacingOccurrences(of: "<\(toolName)>", with: "")
-        .replacingOccurrences(of: "</\(toolName)>", with: "")
+      Logger.tool("ToolParser").debug("Tool content: \(toolContent)")
       
       // Parse individual parameters
-      if let regex = try? NSRegularExpression(pattern: parameterPattern, options: [.dotMatchesLineSeparators]) {
-        regex.enumerateMatches(in: toolContent, range: NSRange(toolContent.startIndex..<toolContent.endIndex, in: toolContent)) { match, _, _ in
+      if let paramRegex = try? NSRegularExpression(pattern: parameterPattern, options: [.dotMatchesLineSeparators]) {
+        paramRegex.enumerateMatches(in: toolContent, range: NSRange(toolContent.startIndex..<toolContent.endIndex, in: toolContent)) { match, _, _ in
           guard let match = match, match.numberOfRanges >= 3,
                 let nameRange = Range(match.range(at: 1), in: toolContent),
                 let valueRange = Range(match.range(at: 2), in: toolContent) else { return }
@@ -406,10 +358,14 @@ struct ToolParser {
           let name = String(toolContent[nameRange])
           let value = String(toolContent[valueRange])
           parameters[name] = value
+          Logger.tool("ToolParser").debug("Found parameter: \(name) = \(value)")
         }
       }
+    } else {
+      Logger.tool("ToolParser").warning("Could not find tool content for tag: \(toolName)")
     }
     
+    Logger.tool("ToolParser").debug("Final params: \(parameters)")
     return ToolCall(toolName: toolName, parameters: parameters, isComplete: isComplete)
   }
   
@@ -481,7 +437,7 @@ struct StreamProcessor {
       
       return nil
     } catch {
-      print("Error parsing JSON line: \(jsonString), Error: \(error)")
+      Logger.stream("parseSSELine").error("Error parsing JSON line: \(jsonString), Error: \(error)")
       return nil
     }
   }
@@ -495,178 +451,6 @@ struct SystemPrompt: Codable {
 }
 
 // MARK: - Business Logic Managers
-
-@MainActor
-class MCPManager: ObservableObject {
-  static let shared = MCPManager()
-  @Published private var mcpServers: [String: MCPServer] = [:]
-  @Published private var activeMCPServers: Set<String> = []
-
-  private init() {
-    loadMCPConfig()
-  }
-
-  private func loadMCPConfig() {
-    do {
-      let config = try MCPConfig.loadConfig(MCPConfig.self)
-      mcpServers = config.mcpServers
-      activeMCPServers = Set(config.mcpServers.filter { $0.value.isActive == true }.keys)
-      print("MCP config loaded successfully: \(mcpServers.count) servers")
-    } catch {
-      print("Error loading MCP config from \(MCPConfig.configPath): \(error)")
-    }
-  }
-
-  func getMCPServers() -> [String: MCPServer] {
-    return mcpServers
-  }
-
-  func getActiveMCPServers() -> Set<String> {
-    return activeMCPServers
-  }
-
-  func setServerActive(_ serverName: String, active: Bool) {
-    if active {
-      activeMCPServers.insert(serverName)
-    } else {
-      activeMCPServers.remove(serverName)
-    }
-    var updatedServers = mcpServers
-    for (name, server) in updatedServers {
-      updatedServers[name] = MCPServer(
-        command: server.command,
-        args: server.args,
-        env: server.env,
-        isActive: activeMCPServers.contains(name) ? true : nil,
-        type: server.type,
-        description: server.description,
-        url: server.url,
-        headers: server.headers
-      )
-    }
-    mcpServers = updatedServers
-  }
-
-  func callMCPTool(serverName: String, toolName: String, arguments: [String: Any]) async -> Result<String, AppError> {
-    guard let server = mcpServers[serverName], activeMCPServers.contains(serverName) else {
-      return .failure(.mcpServerNotFound(serverName))
-    }
-
-    if server.isRemote {
-      return await callRemoteMCPTool(server: server, toolName: toolName, arguments: arguments)
-    } else {
-      return await callLocalMCPTool(server: server, toolName: toolName, arguments: arguments)
-    }
-  }
-
-  private func callRemoteMCPTool(server: MCPServer, toolName: String, arguments: [String: Any])
-    async -> Result<String, AppError>
-  {
-    guard let urlString = server.url, let url = URL(string: urlString) else {
-      return .failure(.invalidURL(server.url ?? "nil"))
-    }
-
-    // Create the MCP tool call request
-    let requestBody: [String: Any] = [
-      "method": "tools/call",
-      "params": [
-        "name": toolName,
-        "arguments": arguments,
-      ],
-    ]
-
-    do {
-      var request = URLRequest(url: url)
-      request.httpMethod = "POST"
-      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-      // Add custom headers if provided
-      if let headers = server.headers {
-        for (key, value) in headers {
-          request.setValue(value, forHTTPHeaderField: key)
-        }
-      }
-
-      // Add authorization header if available from GitHub token
-      if let token = ProcessInfo.processInfo.environment["GITHUB_TOKEN"] {
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-      } else if let token = ProcessInfo.processInfo.environment["GITHUB_PERSONAL_ACCESS_TOKEN"] {
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-      } else if let token = ProcessInfo.processInfo.environment["GH_TOKEN"] {
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-      }
-
-      request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
-
-      let (data, response) = try await URLSession.shared.data(for: request)
-
-      if let httpResponse = response as? HTTPURLResponse {
-        if httpResponse.statusCode == 200 {
-          if let jsonResponse = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let result = jsonResponse["result"]
-          {
-            if let resultData = try? JSONSerialization.data(withJSONObject: result),
-              let resultString = String(data: resultData, encoding: .utf8)
-            {
-              return .success(resultString)
-            }
-            return .success("\(result)")
-          }
-          return .success(String(data: data, encoding: .utf8) ?? "No response data")
-        } else {
-          let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown error"
-          return .failure(.networkError("HTTP \(httpResponse.statusCode): \(errorMsg)"))
-        }
-      }
-
-      return .failure(.networkError("No response"))
-    } catch {
-      return .failure(.mcpError("Failed to call remote MCP tool: \(error.localizedDescription)"))
-    }
-  }
-
-  private func callLocalMCPTool(server: MCPServer, toolName: String, arguments: [String: Any]) async
-    -> Result<String, AppError>
-  {
-    guard let command = server.command, let args = server.args else {
-      return .failure(.mcpError("Local server missing command or args"))
-    }
-
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = [command] + args
-
-    if let env = server.env {
-      var environment = ProcessInfo.processInfo.environment
-      for (key, value) in env {
-        environment[key] = value
-      }
-      process.environment = environment
-    }
-
-    let outputPipe = Pipe()
-    let errorPipe = Pipe()
-    process.standardOutput = outputPipe
-    process.standardError = errorPipe
-
-    do {
-      try process.run()
-      process.waitUntilExit()
-
-      let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-      let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-
-      if process.terminationStatus == 0 {
-        return .success(String(data: outputData, encoding: .utf8) ?? "No output")
-      } else {
-        let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-        return .failure(.mcpExecutionFailed("Error executing MCP tool: \(errorOutput)"))
-      }
-    } catch {
-      return .failure(.mcpError("Failed to execute MCP tool: \(error.localizedDescription)"))
-    }
-  }
-}
 
 @MainActor
 class ChatHistory {
@@ -692,12 +476,12 @@ class ChatHistory {
     let supportedImageTypes = ["jpg", "jpeg", "png", "gif", "webp"]
 
     guard supportedImageTypes.contains(fileType) else {
-      print("Unsupported file type: \(fileType)")
+      Logger.app("ChatHistory").warning("Unsupported file type: \(fileType)")
       return nil
     }
 
     guard fileURL.startAccessingSecurityScopedResource() else {
-      print("Failed to access the file at \(fileURL.path)")
+      Logger.app("ChatHistory").error("Failed to access the file at \(fileURL.path)")
       return nil
     }
     defer {
@@ -727,13 +511,13 @@ class ChatHistory {
         ContentItem(type: "image_url", text: nil, image_url: ImageURL(url: imageUrl)))
 
       guard !contentItems.isEmpty else {
-        print("Error: No content items created for file upload.")
+        Logger.app("ChatHistory").error("No content items created for file upload")
         return nil
       }
       return .multimodal(contentItems)
 
     } catch {
-      print("Error reading or encoding file: \(error.localizedDescription)")
+      Logger.app("ChatHistory").error("Error reading or encoding file: \(error.localizedDescription)")
       return nil
     }
   }
@@ -813,23 +597,23 @@ class ChatHistory {
     messageID: String,
     onQueryCompleted: @escaping () -> Void
   ) async {
-    print("🚀 [sendMessage] === START ===")
-    print("🚀 [sendMessage] Message ID: \(messageID)")
-    print("🚀 [sendMessage] Model: \(modelname)")
-    print("🚀 [sendMessage] User text: \(userText ?? "nil")")
-    print("🚀 [sendMessage] Has message content: \(messageContent != nil)")
+    Logger.network("sendMessage").info("=== START ===")
+    Logger.network("sendMessage").info("Message ID: \(messageID)")
+    Logger.network("sendMessage").info("Model: \(modelname)")
+    Logger.network("sendMessage").info("User text: \(userText ?? "nil")")
+    Logger.network("sendMessage").info("Has message content: \(messageContent != nil)")
     
     let config = OpenAIConfig.load()
     guard let modelConfig = config.getConfig(for: modelname),
           let baseURL = modelConfig.baseURL,
           let apiKey = modelConfig.apiKey else {
-      print("❌ [sendMessage] Error: Model configuration not found or incomplete for \(modelname)")
+      Logger.network("sendMessage").error("Model configuration not found or incomplete for \(modelname)")
       onQueryCompleted()
       return
     }
 
-    print("🚀 [sendMessage] Base URL: \(baseURL)")
-    print("🚀 [sendMessage] API Key: \(apiKey.prefix(10))...")
+    Logger.network("sendMessage").info("Base URL: \(baseURL)")
+    Logger.network("sendMessage").info("API Key: \(apiKey.prefix(10))...")
     
     let url = URL(string: "\(baseURL)/chat/completions")!
     var request = URLRequest(url: url)
@@ -846,32 +630,96 @@ class ChatHistory {
       messagesToSend.append(systemMessage)
     }
 
-    // Add MCP context if active servers exist
-    let activeMCPServers = MCPManager.shared.getActiveMCPServers()
-    if !activeMCPServers.isEmpty {
-      let mcpContext = """
-        Available MCP servers: \(Array(activeMCPServers).joined(separator: ", ")).
+    // Detect @mentions in the user message or system prompt
+    var mentionedServers: Set<String> = []
+    
+    // Helper to extract mentions
+    func extractMentions(from text: String) -> Set<String> {
+        var servers: Set<String> = []
+        let words = text.components(separatedBy: .whitespacesAndNewlines)
+        for word in words {
+            if word.hasPrefix("@") {
+                let serverName = String(word.dropFirst())
+                // Check against ALL configured servers
+                if MCPManager.shared.getMCPServers().keys.contains(serverName) {
+                    servers.insert(serverName)
+                }
+            }
+        }
+        return servers
+    }
+    
+    if let text = userText {
+        mentionedServers.formUnion(extractMentions(from: text))
+    }
+    
+    // Also check selected prompt content if any
+    if !selectedPrompt.isEmpty, selectedPrompt != "None",
+       let prompt = loadPromptContent(name: selectedPrompt) {
+         mentionedServers.formUnion(extractMentions(from: prompt.content))
+    }
 
-        To use MCP tools, use this XML format:
-        <tool_use>
-        <mcp_call>
-        <server>server_name</server>
-        <tool>tool_name</tool>
-        <param1>value1</param1>
-        <param2>value2</param2>
-        </mcp_call>
-        </tool_use>
-
-        For GitHub MCP servers, example tools include:
-        - create_issue: Create a new issue
-        - list_issues: List repository issues  
-        - create_pull_request: Create a pull request
-        - search_repositories: Search for repositories
-
-        Note: Remote GitHub MCP servers require authentication via GITHUB_TOKEN environment variable.
-        """
-      let mcpSystemMessage = ChatMessage(role: "system", content: .text(mcpContext), model: nil)
-      messagesToSend.append(mcpSystemMessage)
+    // Inject tools for mentioned servers
+    if !mentionedServers.isEmpty {
+        var allTools: [ToolDefinition] = []
+        for server in mentionedServers {
+            if let tools = await MCPToolCache.shared.getTools(for: server) {
+                allTools.append(contentsOf: tools)
+            } else {
+                // Try to fetch if missing (auto-fetch strategy)
+                await MCPManager.shared.refreshTools(for: server)
+                if let tools = await MCPToolCache.shared.getTools(for: server) {
+                    allTools.append(contentsOf: tools)
+                }
+            }
+        }
+        
+        if !allTools.isEmpty {
+            // Convert tools to XML format for the LLM
+            var toolsXML = "<tools>\n"
+            for tool in allTools {
+                toolsXML += "<tool_definition>\n"
+                toolsXML += "<name>\(tool.name)</name>\n"
+                if let desc = tool.description {
+                    toolsXML += "<description>\(desc)</description>\n"
+                }
+                // Simplified schema representation for now. 
+                // Ideally we should serialize inputSchema to JSON/XML
+                if let schema = tool.inputSchema {
+                    // Quick and dirty JSON serialization of schema
+                    if let jsonData = try? JSONEncoder().encode(schema),
+                       let jsonString = String(data: jsonData, encoding: .utf8) {
+                        toolsXML += "<parameters>\n\(jsonString)\n</parameters>\n"
+                    }
+                }
+                toolsXML += "</tool_definition>\n"
+            }
+            toolsXML += "</tools>\n"
+            
+            let mcpInstructions = """
+            You have access to the following MCP tools from the servers: \(mentionedServers.joined(separator: ", ")).
+            
+            \(toolsXML)
+            
+            To use a tool, please use the following XML format:
+            <tool_use>
+            <mcp_call>
+            <server>server_name</server>
+            <tool>tool_name</tool>
+            <actual_param_name_1>value1</actual_param_name_1>
+            <actual_param_name_2>value2</actual_param_name_2>
+            </mcp_call>
+            </tool_use>
+            
+            IMPORTANT: Use the actual parameter names from the tool's parameters schema, not generic names like "param1" or "param2".
+            For example, if a tool expects a "city" parameter, use <city>Beijing</city>, not <param1>Beijing</param1>.
+            
+            When you use a tool, the system will execute it and provide the result.
+            """
+            
+            let mcpSystemMessage = ChatMessage(role: "system", content: .text(mcpInstructions), model: nil)
+            messagesToSend.append(mcpSystemMessage)
+        }
     }
 
     let finalContent: MessageContent
@@ -880,7 +728,7 @@ class ChatHistory {
     } else if let text = userText, !text.isEmpty {
       finalContent = .text(text)
     } else {
-      print("Error: No message content to send.")
+      Logger.network("sendMessage").error("No message content to send")
       onQueryCompleted()
       return
     }
@@ -888,27 +736,34 @@ class ChatHistory {
     let userMessage = ChatMessage(
       role: "user", content: finalContent, model: modelname, id: messageID)
     messagesToSend.append(userMessage)
+      messagesToSend.append(userMessage)
     saveMessage(userMessage)
 
     // Extract pure model name without @provider suffix for API request
     let pureModelName = modelname.split(separator: "@").first.map(String.init) ?? modelname
-    print("🚀 [sendMessage] Using pure model name for API: '\(pureModelName)' (from '\(modelname)')")
+    Logger.network("sendMessage").info("Using pure model name for API: '\(pureModelName)' (from '\(modelname)')")
     
     let chatRequest = ChatRequest(
       model: pureModelName, messages: messagesToSend, stream: true
     )
 
-    print("🚀 [sendMessage] Preparing request with \(messagesToSend.count) messages")
+    Logger.network("sendMessage").info("Preparing request with \(messagesToSend.count) messages")
     
     do {
       let encoder = JSONEncoder()
       request.httpBody = try encoder.encode(chatRequest)
       
+      // Log full request body
+      if let jsonData = try? encoder.encode(chatRequest),
+         let jsonString = String(data: jsonData, encoding: .utf8) {
+          Logger.network("sendMessage").debug("Full Request Body:\n\(jsonString)")
+      }
+
       if let httpBody = request.httpBody, let bodyString = String(data: httpBody, encoding: .utf8) {
-        print("🚀 [sendMessage] Request body preview: \(bodyString.prefix(200))...")
+        Logger.network("sendMessage").debug("Request body preview: \(bodyString.prefix(200))...")
       }
     } catch {
-      print("❌ [sendMessage] Error encoding request: \(error)")
+      Logger.network("sendMessage").error("Error encoding request: \(error)")
       onQueryCompleted()
       return
     }
@@ -942,24 +797,24 @@ class ChatHistory {
           kCFNetworkProxiesHTTPSPort: proxyPort,
         ]
       default:
-        print("Unsupported proxy scheme: \(scheme ?? "nil"). Proxy not configured.")
+        Logger.network("sendMessage").warning("Unsupported proxy scheme: \(scheme ?? "nil"). Proxy not configured")
       }
     }
 
-    print("🚀 [sendMessage] Setting up stream delegate...")
+    Logger.network("sendMessage").info("Setting up stream delegate...")
     streamDelegate.output = AttributedString("")
     streamDelegate.setModel(modelname)
     streamDelegate.currentMessageID = messageID
     streamDelegate.setQueryCompletionCallback(onQueryCompleted)
 
-    print("🚀 [sendMessage] Creating URLSession and starting task...")
+    Logger.network("sendMessage").info("Creating URLSession and starting task...")
     let session = URLSession(
       configuration: sessionConfig, delegate: streamDelegate, delegateQueue: nil)
     let task = session.dataTask(with: request)
     streamDelegate.currentTask = task
     task.resume()
-    print("🚀 [sendMessage] Task resumed, waiting for response...")
-    print("🚀 [sendMessage] === END ===")
+    Logger.network("sendMessage").info("Task resumed, waiting for response...")
+    Logger.network("sendMessage").info("=== END ===")
   }
 }
 
@@ -982,7 +837,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   func cancelCurrentQuery() {
-    print("🛑 [cancelCurrentQuery] Cancelling query...")
+    Logger.stream("cancelCurrentQuery").info("Cancelling query...")
     currentTask?.cancel()
     DispatchQueue.main.async {
       self.output = AttributedString("")
@@ -994,7 +849,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
     }
     self.currentTask = nil
     self.currentMessageID = nil
-    print("🛑 [cancelCurrentQuery] Query cancelled and StreamDelegate state reset.")
+    Logger.stream("cancelCurrentQuery").success("Query cancelled and StreamDelegate state reset")
   }
 
   func setQueryCompletionCallback(_ callback: @escaping () -> Void) {
@@ -1006,30 +861,96 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   private func detectAndExecuteMCPCall(_ text: String) async {
+    Logger.tool("detectAndExecuteMCPCall").debug("Checking text of length \(text.count)")
+    Logger.tool("detectAndExecuteMCPCall").debug("Text preview: \(text.suffix(200))")
     let toolCalls = ToolParser.extractToolCalls(from: text)
-    for call in toolCalls where call.isComplete && call.toolName == "mcp_call" {
-      await executeMCPTool(call)
+    Logger.tool("detectAndExecuteMCPCall").info("Found \(toolCalls.count) tool calls in text")
+    for call in toolCalls {
+      Logger.tool("detectAndExecuteMCPCall").debug("Tool: \(call.toolName), Complete: \(call.isComplete), Params: \(call.parameters)")
+      if call.isComplete && call.toolName == "mcp_call" {
+        Logger.tool("detectAndExecuteMCPCall").success("Executing MCP tool")
+        await executeMCPTool(call)
+      } else if !call.isComplete {
+        Logger.tool("detectAndExecuteMCPCall").info("Tool call incomplete, waiting for more data")
+      }
     }
   }
   
   private func executeMCPTool(_ call: ToolCall) async {
     guard let server = call.parameters["server"],
-          let tool = call.parameters["tool"] else { return }
+          let tool = call.parameters["tool"] else { 
+      Logger.tool("executeMCPTool").error("Missing server or tool parameter")
+      return 
+    }
     
-    let args = call.parameters.filter { !["server", "tool"].contains($0.key) }
+    Logger.tool("executeMCPTool").info("Server: \(server), Tool: \(tool)")
+    Logger.tool("executeMCPTool").debug("All parameters (raw): \(call.parameters)")
+    Logger.tool("executeMCPTool").debug("Number of parameters: \(call.parameters.count)")
+    
+    // Parse parameters - handle both direct params and JSON-wrapped params
+    var args: [String: Any] = [:]
+    
+    // First, check if there's a single param that contains a JSON object
+    // This handles cases like <param1>{"city":"北京"}</param1>
+    let nonMetaParams = call.parameters.filter { !["server", "tool"].contains($0.key) }
+    
+    Logger.tool("executeMCPTool").debug("Non-meta params count: \(nonMetaParams.count)")
+    Logger.tool("executeMCPTool").debug("Non-meta params: \(nonMetaParams)")
+    
+    if nonMetaParams.count == 1,
+       let (paramKey, value) = nonMetaParams.first,
+       let data = value.data(using: .utf8),
+       let jsonObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+      // Single parameter contains a JSON object - use it directly as arguments
+      args = jsonObject
+      Logger.tool("executeMCPTool").info("Unwrapped JSON object from parameter '\(paramKey)': \(args)")
+    } else {
+      // Multiple parameters or non-JSON - parse each individually
+      Logger.tool("executeMCPTool").info("Processing \(nonMetaParams.count) parameters individually")
+      for (key, value) in nonMetaParams {
+        Logger.tool("executeMCPTool").debug("Processing param: \(key) = '\(value)'")
+        // Try to parse as JSON first
+        if let data = value.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) {
+          args[key] = json
+          Logger.tool("executeMCPTool").debug("Parsed \(key) as JSON: \(json)")
+        } else {
+          // Use as string if not valid JSON
+          args[key] = value
+          Logger.tool("executeMCPTool").debug("Using \(key) as string: '\(value)'")
+        }
+      }
+    }
+    
+    Logger.tool("executeMCPTool").info("Final arguments dictionary to pass to MCP: \(args)")
+    Logger.tool("executeMCPTool").debug("Arguments keys: \(args.keys.sorted())")
+    for (k, v) in args {
+      Logger.tool("executeMCPTool").debug("  \(k): '\(v)' (type: \(type(of: v)))")
+    }
+    
     let argsDisplay = args.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
-    
     let argsInfo = argsDisplay.isEmpty ? "" : "参数:\n\(argsDisplay)\n"
+    
+    Logger.tool("executeMCPTool").info("Calling updateUI with 'executing' message")
     await updateUI("🔧 执行 MCP 工具", "服务器: \(server)\n工具: \(tool)\n\(argsInfo)\n执行中...")
     
-    let result = await MCPManager.shared.callMCPTool(serverName: server, toolName: tool, arguments: args)
+    Logger.tool("executeMCPTool").info("Calling MCPManager.callMCPTool with args: \(args), bypassing active check")
+    // Bypass active check when calling from mention - allow any configured server
+    let result = await MCPManager.shared.callMCPTool(serverName: server, toolName: tool, arguments: args, bypassActiveCheck: true)
+    
+    Logger.tool("executeMCPTool").debug("Got result: \(result)")
     
     switch result {
     case .success(let output):
+        Logger.tool("executeMCPTool").success("Success! Output length: \(output.count)")
         let formatted = formatResult(output)
+        Logger.tool("executeMCPTool").debug("Formatted output length: \(formatted.count)")
         await updateUI("📋 工具结果", "```\n\(formatted)\n```")
+        Logger.tool("executeMCPTool").success("UI updated with result")
     case .failure(let error):
+        Logger.tool("executeMCPTool").error("Failure: \(error.localizedDescription)")
         await updateUI("❌ 工具执行失败", error.localizedDescription)
+        Logger.tool("executeMCPTool").error("UI updated with error")
     }
   }
   
@@ -1064,15 +985,15 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
     let msgID = currentMessageID ?? "nil"
-    print("📥 [didReceive] Received \(data.count) bytes, Message ID: \(msgID)")
+    Logger.stream("didReceive").debug("Received \(data.count) bytes, Message ID: \(msgID)")
     
     guard currentTask == dataTask, currentMessageID != nil else {
-      print("⚠️ [didReceive] Ignoring data - task mismatch or no message ID")
+      Logger.stream("didReceive").warning("Ignoring data - task mismatch or no message ID")
       return
     }
 
     if let text = String(data: data, encoding: .utf8) {
-      print("📥 [didReceive] Data text preview: \(text.prefix(100))...")
+      Logger.stream("didReceive").debug("Data text preview: \(text.prefix(100))...")
       if let response = dataTask.response as? HTTPURLResponse,
         response.statusCode >= 400
       {
@@ -1093,29 +1014,19 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
 
   private func processLines(_ lines: [String]) {
+    var isDone = false
+    var accumulatedContent = ""  // Accumulate content locally to avoid async issues
+    var accumulatedOutput: [AttributedString] = []  // Accumulate UI updates
+    
+    // First pass: process all content chunks
     for line in lines {
-      print("🔄 [processLines] Processing line: \(line.prefix(100))...")
+      Logger.stream("processLines").debug("Processing line: \(line.prefix(100))...")
       
-      // Check for [DONE] marker
+      // Check for [DONE] marker but don't process it yet
       if line.contains("data: [DONE]") {
-        print("✅ [processLines] Received [DONE] marker")
-        let finalResponse = currentResponse
-        DispatchQueue.main.async {
-          if !finalResponse.isEmpty {
-            let assistantMessage = ChatMessage(
-              role: "assistant", content: .text(finalResponse), model: self.currentModel,
-              id: self.currentMessageID)
-            ChatHistory.shared.saveMessage(assistantMessage)
-          }
-          self.currentResponse = ""
-          self.isCurrentlyReasoning = false
-          self.pendingMCPCall = ""
-          self.dataBuffer = ""
-          self.currentTask = nil
-          self.currentMessageID = nil
-          self.onQueryCompleted?()
-        }
-        return
+        Logger.stream("processLines").success("Found [DONE] marker, will process after all content")
+        isDone = true
+        continue
       }
 
       // Use StreamProcessor to parse SSE line
@@ -1123,36 +1034,88 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         continue
       }
       
-      print("✨ [processLines] Got content chunk (\(chunk.isReasoning ? "reasoning" : "normal")): \(chunk.content.prefix(50))...")
+      Logger.stream("processLines").debug("Got content chunk (\(chunk.isReasoning ? "reasoning" : "normal")): \(chunk.content)")
       
-      DispatchQueue.main.async { [chunk] in
-        guard self.currentMessageID != nil else { return }
+      // Accumulate content locally FIRST
+      var chunkToAppend = chunk.content
+      
+      // Handle transition from reasoning to normal content
+      if !chunk.isReasoning && self.isCurrentlyReasoning {
+        chunkToAppend = "\n" + chunkToAppend
+        self.isCurrentlyReasoning = false
+      }
 
-        var chunkToAppend = chunk.content
-        var attributedChunk: AttributedString
-
-        // Handle transition from reasoning to normal content
-        if !chunk.isReasoning && self.isCurrentlyReasoning {
-          chunkToAppend = "\n" + chunkToAppend
-          self.isCurrentlyReasoning = false
-        }
-
-        if chunk.isReasoning {
-          self.isCurrentlyReasoning = true
-        }
-
-        self.currentResponse += chunkToAppend
-        self.pendingMCPCall += chunkToAppend
-
+      if chunk.isReasoning {
+        self.isCurrentlyReasoning = true
+      }
+      
+      accumulatedContent += chunkToAppend
+      
+      // Prepare attributed string for UI
+      var attributedChunk: AttributedString
+      let containsToolUse = chunkToAppend.contains("<tool_use>") || chunkToAppend.contains("</tool_use>") || 
+                             chunkToAppend.contains("<mcp_call>") || chunkToAppend.contains("</mcp_call>")
+      
+      if containsToolUse {
+        // Apply "think" style (secondary color) to tool use content
+        attributedChunk = AttributedString(chunkToAppend)
+        attributedChunk.foregroundColor = .secondary
+      } else {
+        // Normal content
         attributedChunk = AttributedString(chunkToAppend)
         if chunk.isReasoning {
           attributedChunk.foregroundColor = .secondary
         }
-        self.output += attributedChunk
-
-        // Check for MCP action pattern in accumulated text
+      }
+      
+      accumulatedOutput.append(attributedChunk)
+    }
+    
+    // Update UI synchronously on main thread with all accumulated content
+    DispatchQueue.main.sync {
+      guard self.currentMessageID != nil else { return }
+      
+      for attrStr in accumulatedOutput {
+        self.output += attrStr
+      }
+      
+      self.currentResponse += accumulatedContent
+      self.pendingMCPCall += accumulatedContent
+    }
+    
+    // Second pass: handle DONE if present
+    if isDone {
+      Logger.stream("processLines").success("Processing [DONE] marker after all content")
+      Logger.stream("processLines").debug("Current batch accumulated: \(accumulatedContent.count) chars")
+      
+      // Wait for UI sync to complete, then use pendingMCPCall which has ALL content
+      DispatchQueue.main.async {
+        let completeContent = self.pendingMCPCall
+        let messageID = self.currentMessageID
+        Logger.stream("processLines").debug("Complete pendingMCPCall length: \(completeContent.count)")
+        Logger.stream("processLines").info("Performing final tool detection on complete response")
+        
+        // Execute tools BEFORE cleanup, so currentMessageID is still valid
         Task {
-          await self.detectAndExecuteMCPCall(self.pendingMCPCall)
+          await self.detectAndExecuteMCPCall(completeContent)
+          
+          // AFTER tool execution completes, then save and cleanup
+          DispatchQueue.main.async {
+            let finalResponse = self.currentResponse
+            if !finalResponse.isEmpty {
+              let assistantMessage = ChatMessage(
+                role: "assistant", content: .text(finalResponse), model: self.currentModel,
+                id: messageID)
+              ChatHistory.shared.saveMessage(assistantMessage)
+            }
+            self.currentResponse = ""
+            self.isCurrentlyReasoning = false
+            self.pendingMCPCall = ""
+            self.dataBuffer = ""
+            self.currentTask = nil
+            self.currentMessageID = nil
+            self.onQueryCompleted?()
+          }
         }
       }
     }
@@ -1161,9 +1124,9 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     guard currentTask == task && currentMessageID != nil else {
       if error == nil || (error as NSError?)?.code == NSURLErrorCancelled {
-        print("Completion handler for an outdated/cancelled task, ignoring.")
+        Logger.stream("didCompleteWithError").info("Completion handler for an outdated/cancelled task, ignoring")
       } else if let error = error {
-        print("Error for an outdated task: \(error.localizedDescription)")
+        Logger.stream("didCompleteWithError").error("Error for an outdated task: \(error.localizedDescription)")
       }
       return
     }
@@ -1172,7 +1135,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       DispatchQueue.main.async {
         self.currentResponse = ""
         if (error as NSError).code == NSURLErrorCancelled {
-          print("URLSession task explicitly cancelled.")
+          Logger.stream("didCompleteWithError").info("URLSession task explicitly cancelled")
         } else {
           var errorChunk = AttributedString("\nNetwork Error: \(error.localizedDescription)")
           errorChunk.foregroundColor = .red
@@ -1213,6 +1176,8 @@ final class ChatViewModel: ObservableObject {
   @Published var currentMessageID: String?
   @Published var selectedFileURL: URL?
   @Published var selectedFileName: String?
+  @Published var filteredMCPServers: [String] = []
+  @Published var selectedMentionIndex: Int = 0
   
   let streamDelegate: StreamDelegate
   let speechManager: SpeechManager
@@ -1234,11 +1199,61 @@ final class ChatViewModel: ObservableObject {
     streamDelegate.objectWillChange.sink { [weak self] _ in
       self?.objectWillChange.send()
     }.store(in: &cancellables)
+    
+    // Monitor input changes for @ mentions
+    $input
+      .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+      .sink { [weak self] newValue in
+        self?.checkInputForServerMention(newValue)
+      }
+      .store(in: &cancellables)
+  }
+  
+  private func checkInputForServerMention(_ text: String) {
+    // Simple check: if the last word starts with @, filter servers
+    // Find the last @
+    if let lastAt = text.lastIndex(of: "@") {
+      let suffix = text[lastAt...].dropFirst() // content after @
+      // Ensure no spaces after @ for completion
+      if !suffix.contains(" ") {
+        let query = String(suffix).lowercased()
+        // Use ALL servers, not just active ones
+        let allServers = MCPManager.shared.getMCPServers().keys
+        
+        if query.isEmpty {
+             filteredMCPServers = Array(allServers).sorted()
+        } else {
+             filteredMCPServers = allServers.filter { $0.lowercased().contains(query) }.sorted()
+        }
+        selectedMentionIndex = 0 // Reset selection
+        return
+      }
+    }
+    filteredMCPServers = []
+    selectedMentionIndex = 0
+  }
+  
+  func handleServerSelection(_ server: String) {
+    if let lastAt = input.lastIndex(of: "@") {
+        let prefix = input[..<lastAt]
+        input = String(prefix) + "@" + server + " "
+        filteredMCPServers = []
+        
+        // Trigger auto-fetch if needed
+        Task {
+            if let tools = await MCPToolCache.shared.getTools(for: server), !tools.isEmpty {
+                // Already cached
+            } else {
+                // Not cached, fetch
+                await MCPManager.shared.refreshTools(for: server)
+            }
+        }
+    }
   }
   
   func submitInput() async {
-    print("📤 [submitInput] === START ===")
-    print("📤 [submitInput] Input text: '\(input)'")
+    Logger.input("submitInput").info("=== START ===")
+    Logger.input("submitInput").info("Input text: '\(input)'")
     
     let newMessageID = UUID().uuidString
     self.currentMessageID = newMessageID
@@ -1246,22 +1261,22 @@ final class ChatViewModel: ObservableObject {
     let textToSend = self.input
     let fileURLToSend = self.selectedFileURL
     
-    print("📤 [submitInput] Message ID: \(newMessageID)")
-    print("📤 [submitInput] Text to send: '\(textToSend)'")
-    print("📤 [submitInput] Model: \(modelname)")
-    print("📤 [submitInput] Prompt: \(selectedPrompt)")
-    print("📤 [submitInput] Has file: \(fileURLToSend != nil)")
+    Logger.input("submitInput").info("Message ID: \(newMessageID)")
+    Logger.input("submitInput").info("Text to send: '\(textToSend)'")
+    Logger.input("submitInput").info("Model: \(modelname)")
+    Logger.input("submitInput").info("Prompt: \(selectedPrompt)")
+    Logger.input("submitInput").info("Has file: \(fileURLToSend != nil)")
     
     self.selectedFileURL = nil
     self.selectedFileName = nil
     
     if let url = fileURLToSend {
-      print("📤 [submitInput] Processing file upload...")
+      Logger.input("submitInput").info("Processing file upload...")
       if let contentToSend = await ChatHistory.shared.handleFileUpload(
         fileURL: url,
         associatedText: textToSend
       ) {
-        print("📤 [submitInput] Calling sendMessage with file content...")
+        Logger.input("submitInput").info("Calling sendMessage with file content...")
         await ChatHistory.shared.sendMessage(
           userText: nil,
           messageContent: contentToSend,
@@ -1272,11 +1287,11 @@ final class ChatViewModel: ObservableObject {
           onQueryCompleted: self.queryDidComplete
         )
       } else {
-        print("❌ [submitInput] Error processing file upload, message not sent.")
+        Logger.input("submitInput").error("Error processing file upload, message not sent")
         self.queryDidComplete()
       }
     } else if !textToSend.isEmpty {
-      print("📤 [submitInput] Calling sendMessage with text content...")
+      Logger.input("submitInput").info("Calling sendMessage with text content...")
       await ChatHistory.shared.sendMessage(
         userText: textToSend,
         messageContent: nil,
@@ -1286,21 +1301,21 @@ final class ChatViewModel: ObservableObject {
         messageID: newMessageID,
         onQueryCompleted: self.queryDidComplete
       )
-      print("📤 [submitInput] sendMessage call completed")
+      Logger.input("submitInput").success("sendMessage call completed")
     } else {
-      print("⚠️ [submitInput] No content to send")
+      Logger.input("submitInput").warning("No content to send")
       self.queryDidComplete()
     }
-    print("📤 [submitInput] === END ===")
+    Logger.input("submitInput").info("=== END ===")
   }
   
   func queryDidComplete() {
-    print("✅ [queryDidComplete] Query completed, setting isQueryActive to false")
+    Logger.ui("queryDidComplete").success("Query completed, setting isQueryActive to false")
     isQueryActive = false
   }
   
   func cancelQuery() {
-    print("🛑 [cancelQuery] Cancelling query...")
+    Logger.ui("cancelQuery").info("Cancelling query...")
     streamDelegate.cancelCurrentQuery()
     queryDidComplete()
   }
@@ -1322,6 +1337,21 @@ struct App: SwiftUI.App {
   
   @FocusState private var focused: Bool
 
+  init() {
+    // Existing init code...
+    // Monitor for arrow keys when popup is active
+    NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        if event.keyCode == 126 { // Arrow Up
+            NotificationCenter.default.post(name: NSNotification.Name("ArrowUpKeyDown"), object: nil)
+            return event
+        } else if event.keyCode == 125 { // Arrow Down
+            NotificationCenter.default.post(name: NSNotification.Name("ArrowDownKeyDown"), object: nil)
+            return event
+        }
+        return event
+    }
+  }
+  
   var body: some Scene {
     WindowGroup {
       VStack(alignment: .leading) {
@@ -1352,6 +1382,10 @@ struct App: SwiftUI.App {
       .onReceive(
         NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification),
         perform: { _ in
+          // Clean up MCP connections before exiting
+          Task { @MainActor in
+            MCPManager.shared.shutdown()
+          }
           exit(0)
         }
       )
@@ -1376,21 +1410,62 @@ struct App: SwiftUI.App {
 
 extension App {
   private var LLMInputView: some View {
-    HStack {
+    VStack(alignment: .leading, spacing: 0) {
+      if !viewModel.filteredMCPServers.isEmpty {
+        ScrollViewReader { proxy in
+            ScrollView {
+              VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(viewModel.filteredMCPServers.enumerated()), id: \.element) { index, server in
+                  Button(action: {
+                    viewModel.handleServerSelection(server)
+                  }) {
+                    HStack {
+                      Text(server)
+                        .font(.system(size: 12))
+                        .foregroundColor(.primary)
+                      Spacer()
+                      Text("MCP")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 10)
+                    .background(index == viewModel.selectedMentionIndex ? Color.accentColor.opacity(0.2) : Color.clear)
+                    .contentShape(Rectangle())
+                  }
+                  .buttonStyle(PlainButtonStyle())
+                  .id(index)
+                }
+              }
+            }
+            .frame(maxHeight: 120)
+            .background(VisualEffect())
+            .cornerRadius(8)
+            .padding(.bottom, 4) // Reduced padding to be closer
+            .padding(.horizontal, 10)
+            .onChange(of: viewModel.selectedMentionIndex) { _, newIndex in
+                withAnimation {
+                    proxy.scrollTo(newIndex, anchor: .center)
+                }
+            }
+        }
+      }
+
+      HStack {
       Button(action: {
         if viewModel.isQueryActive {
-          print("🛑 [Button] User manually stopping query")
+          Logger.ui("Button").info("User manually stopping query")
           viewModel.cancelQuery()
           viewModel.input = ""
         } else {
           if !viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            print("▶️ [Button] User starting query")
+            Logger.ui("Button").info("User starting query")
             Task {
               viewModel.isQueryActive = true
               await viewModel.submitInput()
             }
           } else {
-            print("⚠️ [Button] Empty input, not starting query")
+            Logger.ui("Button").warning("Empty input, not starting query")
           }
         }
       }) {
@@ -1411,26 +1486,44 @@ extension App {
         .textFieldStyle(.plain)
         .focused($focused)
         .onSubmit {
+            // If popup is visible, Enter selects the item
+            if !viewModel.filteredMCPServers.isEmpty {
+                let server = viewModel.filteredMCPServers[viewModel.selectedMentionIndex]
+                viewModel.handleServerSelection(server)
+                return
+            }
+            
           if !viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            print("⏎ [onSubmit] User submitted input via Enter key")
+            Logger.ui("onSubmit").info("User submitted input via Enter key")
             Task {
               viewModel.isQueryActive = true
               await viewModel.submitInput()
             }
           } else {
-            print("⚠️ [onSubmit] Empty input, not submitting")
+            Logger.ui("onSubmit").warning("Empty input, not submitting")
           }
         }
+        // Intercept Up/Down keys for navigation
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ArrowUpKeyDown"))) { _ in
+            if !viewModel.filteredMCPServers.isEmpty {
+                viewModel.selectedMentionIndex = max(0, viewModel.selectedMentionIndex - 1)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ArrowDownKeyDown"))) { _ in
+            if !viewModel.filteredMCPServers.isEmpty {
+                viewModel.selectedMentionIndex = min(viewModel.filteredMCPServers.count - 1, viewModel.selectedMentionIndex + 1)
+            }
+        }
         .onChange(of: viewModel.speechManager.transcribedText) { oldValue, newValue in
-            print("🔄 [onChange] transcribedText changed from '\(oldValue)' to '\(newValue)'")
+            Logger.asr("onChange").debug("transcribedText changed from '\(oldValue)' to '\(newValue)'")
             if !newValue.isEmpty {
-                print("📝 [onChange] Inserting text at index \(insertionIndex)")
-                print("📝 [onChange] Initial text: '\(initialInputText)'")
+                Logger.asr("onChange").info("Inserting text at index \(insertionIndex)")
+                Logger.asr("onChange").debug("Initial text: '\(initialInputText)'")
                 // Insert at the captured cursor position
                 let prefix = String(initialInputText.prefix(insertionIndex))
                 let suffix = String(initialInputText.suffix(initialInputText.count - insertionIndex))
                 viewModel.input = prefix + newValue + suffix
-                print("📝 [onChange] New input: '\(viewModel.input)'")
+                Logger.asr("onChange").debug("New input: '\(viewModel.input)'")
                 
                 // Calculate the new cursor position (after the inserted text)
                 let newCursorPosition = insertionIndex + newValue.count
@@ -1445,18 +1538,20 @@ extension App {
                         // For a cursor position (no selection), length = 0
                         let range = NSRange(location: min(newCursorPosition, self.viewModel.input.count), length: 0)
                         textView.setSelectedRange(range)
-                        print("📍 Cursor positioned at: \(newCursorPosition)")
+                        Logger.asr("onChange").debug("Cursor positioned at: \(newCursorPosition)")
                     }
                 }
             }
         }
     }
+    }
     .padding(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+
     .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyDown)) { notification in
-        print("🎤 Right Option key down detected")
+        Logger.asr("rightOptionKeyDown").info("Right Option key down detected")
         guard notification.userInfo?["isLongPress"] != nil else { return }
         if !viewModel.speechManager.isRecording {
-            print("🎤 Starting recording")
+            Logger.asr("rightOptionKeyDown").info("Starting recording")
             
             // Capture current input and cursor position
             initialInputText = viewModel.input
@@ -1478,15 +1573,15 @@ extension App {
                 insertionIndex = viewModel.input.count
             }
             
-            print("📍 Insertion index: \(insertionIndex)")
+            Logger.asr("rightOptionKeyDown").debug("Insertion index: \(insertionIndex)")
             viewModel.speechManager.startRecording()
         }
     }
     .onReceive(NotificationCenter.default.publisher(for: .rightOptionKeyUp)) { _ in
-        print("🎤 Right Option key up detected")
+        Logger.asr("rightOptionKeyUp").info("Right Option key up detected")
         Task { @MainActor in
             if viewModel.speechManager.isRecording {
-                print("🎤 Stopping recording")
+                Logger.asr("rightOptionKeyUp").info("Stopping recording")
                 viewModel.speechManager.stopRecording()
             }
         }
@@ -1600,10 +1695,10 @@ struct ModelMenuView: View {
     let config = OpenAIConfig.load()
     var tempMap: [(model: String, provider: String, fullName: String)] = []
     
-    print("🔍 Loading models from config. Providers found: \(config.models.keys.joined(separator: ", "))")
+    Logger.config("ModelMenuView").info("Loading models from config. Providers found: \(config.models.keys.joined(separator: ", "))")
     
     for (providerKey, modelConfig) in config.models {
-      print("  Provider '\(providerKey)' has \(modelConfig.models.count) models")
+      Logger.config("ModelMenuView").debug("Provider '\(providerKey)' has \(modelConfig.models.count) models")
       for model in modelConfig.models {
         let fullName = "\(model)@\(providerKey)"
         tempMap.append((model: model, provider: providerKey, fullName: fullName))
@@ -1611,7 +1706,7 @@ struct ModelMenuView: View {
     }
     
     self._modelProviderMap = State(initialValue: tempMap.sorted { $0.model < $1.model })
-    print("✅ Loaded \(tempMap.count) models total in init()")
+    Logger.config("ModelMenuView").success("Loaded \(tempMap.count) models total in init()")
   }
   
   var body: some View {
@@ -1753,11 +1848,14 @@ struct MCPMenuView: View {
   }
 }
 
+
+
 struct MCPServerRow: View {
   let serverName: String
   let server: MCPServer
   @State var isActive: Bool
   let onToggle: (Bool) -> Void
+  @State private var isRefreshing = false
 
   var body: some View {
     HStack {
@@ -1804,6 +1902,22 @@ struct MCPServerRow: View {
       }
 
       Spacer()
+      
+      Button(action: {
+        Task {
+            isRefreshing = true
+            await MCPManager.shared.refreshTools(for: serverName)
+            isRefreshing = false
+        }
+      }) {
+        Image(systemName: "arrow.clockwise")
+            .font(.system(size: 10))
+            .foregroundColor(isRefreshing ? .accentColor : .secondary)
+            .rotationEffect(isRefreshing ? .degrees(360) : .degrees(0))
+            .animation(isRefreshing ? Animation.linear(duration: 1).repeatForever(autoreverses: false) : .default, value: isRefreshing)
+      }
+      .buttonStyle(PlainButtonStyle())
+      .help("Refresh tools")
     }
     .padding(.horizontal, 10)
     .padding(.vertical, 4)
@@ -1870,7 +1984,7 @@ struct FileUploadButton: View {
           selectedFileName = nil
         }
       case .failure(let error):
-        print("Error selecting file: \(error.localizedDescription)")
+        Logger.ui("FileUploadButton").error("Error selecting file: \(error.localizedDescription)")
         selectedFileName = nil
       }
     }
@@ -1922,15 +2036,15 @@ struct OpenAIConfig: Codable, ConfigLoadable {
       let config = try loadConfig(OpenAIConfig.self)
 
       if config.getConfig(for: config.defaultModel) == nil {
-        print("Warning: Default model '\(config.defaultModel)' not found in config. Falling back.")
+        Logger.config("OpenAIConfig").warning("Default model '\(config.defaultModel)' not found in config. Falling back")
         let fallbackModel = config.allModels.first ?? AppConstants.DefaultModels.openAI
-        print("Using fallback model: \(fallbackModel)")
+        Logger.config("OpenAIConfig").info("Using fallback model: \(fallbackModel)")
         return OpenAIConfig(models: config.models, legacy: config.legacy, defaultModel: fallbackModel)
       }
       return config
 
     } catch {
-      print("Error loading config: \(error). Using default configuration.")
+      Logger.config("OpenAIConfig").error("Error loading config: \(error). Using default configuration")
       let defaultModels = [
         "default": ModelConfig(
           baseURL: "https://api.openai.com/v1", apiKey: "YOUR_API_KEY",
@@ -1941,35 +2055,35 @@ struct OpenAIConfig: Codable, ConfigLoadable {
   }
 
   func getConfig(for model: String) -> ModelConfig? {
-    print("🔍 [getConfig] Looking up config for model: '\(model)'")
+    Logger.config("getConfig").debug("Looking up config for model: '\(model)'")
     
     // Handle model@provider format
     let components = model.split(separator: "@")
     let modelName = String(components.first ?? "")
     let providerName = components.count > 1 ? String(components.last!) : nil
     
-    print("🔍 [getConfig] Parsed - model: '\(modelName)', provider: '\(providerName ?? "nil")'")
+    Logger.config("getConfig").debug("Parsed - model: '\(modelName)', provider: '\(providerName ?? "nil")'")
     
     // If provider is specified, look in that provider's config
     if let provider = providerName, let config = models[provider] {
-      print("🔍 [getConfig] Found provider '\(provider)' config with models: \(config.models)")
+      Logger.config("getConfig").debug("Found provider '\(provider)' config with models: \(config.models)")
       if config.models.contains(modelName) {
-        print("✅ [getConfig] Found model '\(modelName)' in provider '\(provider)'")
+        Logger.config("getConfig").success("Found model '\(modelName)' in provider '\(provider)'")
         return config
       }
     }
     
     // Fallback: search all providers for the full model string or just model name
-    print("🔍 [getConfig] Searching all providers...")
+    Logger.config("getConfig").debug("Searching all providers...")
     for (providerKey, config) in models {
-      print("🔍 [getConfig] Checking provider '\(providerKey)': \(config.models)")
+      Logger.config("getConfig").debug("Checking provider '\(providerKey)': \(config.models)")
       if config.models.contains(model) || config.models.contains(modelName) {
-        print("✅ [getConfig] Found model in provider '\(providerKey)'")
+        Logger.config("getConfig").success("Found model in provider '\(providerKey)'")
         return config
       }
     }
     
-    print("❌ [getConfig] Configuration for model '\(model)' not found in any provider.")
+    Logger.config("getConfig").error("Configuration for model '\(model)' not found in any provider")
     return nil
   }
 }
