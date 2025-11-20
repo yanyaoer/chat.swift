@@ -1,0 +1,38 @@
+name: Build and Release Nightly
+
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      - name: Build
+        run: swift build -v
+
+  release:
+    runs-on: macos-latest
+    needs: build
+    if: github.ref != 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      - name: Build executable for release
+        run: swift build -v -c release -Xswiftc -disable-round-trip-debug-types
+      - run: ls -la .build/release/
+      - name: Compress archive
+        run: tar -czf chat.swift.nightly.${{ github.ref_name }}.tar.gz .build/release/chat.swift
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly/${{ github.ref_name }}
+          files: chat.swift.nightly.${{ github.ref_name }}.tar.gz
+          token: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: true

@@ -53,7 +53,22 @@ Use your own config file located at `.config/chat.swift/config.json`
     "defaultModel": "deepseek-v3-250324"
 } 
 ```
-* support socks5 proxy only
+* support socks5 and http[s] proxy
+
+## MCP Config
+Configure MCP servers in `.config/chat.swift/mcp.json`:
+
+```json
+{
+    "mcpServers": {
+        "filesystem": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/username/Desktop"],
+            "type": "stdio"
+        }
+    }
+}
+```
 
 ## Prompts
 reading markdown file to `.config/chat.swift/prompts/` as system prompt
@@ -103,16 +118,20 @@ example with [skhd](https://github.com/koekeishiya/skhd) or add Keyboard Shortcu
 ctrl + alt + shift + cmd - k	:	chat.swift
 ```
 
+- press `right option` key to recording audio and recognize to input text (Long press supported)
+
 ## Feature:
 - minimal chat UI
 - always on top of desktop
 - autoclose with last window
 - support multiple models and remember the last model
-- socks5 and http[s] proxy for gemini
+- socks5 and http[s] proxy support (configurable per model)
 - set prompts folder
 - image upload and Understand
-[] support grouding web search with gemini-2.x
-[x] display/toggle thinking for reasoning model
-[] ASR with sherppa-onnx or whisper.cpp
-[] multi-models stream with user input and prompt recap as wireshark
-[] mlx-lm models support from local
+- [x] MCP (Model Context Protocol) Client support
+- [x] display/toggle thinking for reasoning model
+- [x] ASR with [speech framework](https://developer.apple.com/documentation/speech) (Robust error handling & device detection)
+- [] support grouding web search with gemini-2.x
+- [] ASR with sherppa-onnx or whisper.cpp
+- [] multi-models stream with user input and prompt recap as wireshark
+- [] mlx-lm models support from local

@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
   name: "chat.swift",
-  platforms: [.macOS(.v14)],
+  platforms: [.macOS(.v15)],
   // dependencies: [
   // .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.7.1")
   // ],
