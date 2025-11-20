@@ -150,7 +150,7 @@ enum AppConstants {
   static let configDirectoryName = "chat.swift"
   static let historyFileName = "history.md"
   static let promptsDirectoryName = "prompts"
-  static let mcpConfigFileName = "mcp_config.json"
+  static let mcpConfigFileName = "mcp.json"
   static let mainConfigFileName = "config.json"
   
   enum UserDefaults {
