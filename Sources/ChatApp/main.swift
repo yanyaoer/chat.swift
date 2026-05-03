@@ -14,100 +14,74 @@ extension Notification.Name {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    private var eventMonitor: Any?
-    private var keyDownTimer: Timer?
-    private var isRightOptionDown = false
+  private var globalMonitor: Any?
+  private var keyDownTimer: Timer?
+  private var isRightOptionDown = false
 
-    private let rightOptionKeyCode: UInt16 = 61
+  private static let rightOptionKeyCode: UInt16 = 61
+  private static let longPressSeconds: TimeInterval = 1.0
 
-    func applicationDidFinishLaunching(_ aNotification: Notification) {
-        // Configure window appearance
-        NSApplication.shared.setActivationPolicy(.accessory)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        if let window = NSApplication.shared.windows.first {
-            window.level = .floating
-            window.standardWindowButton(.closeButton)?.isHidden = true
-            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
-            window.standardWindowButton(.zoomButton)?.isHidden = true
-        }
-
-        // Check accessibility permissions for global key monitoring
-        let trusted = AXIsProcessTrusted()
-        if !trusted {
-            Logger.app("AppDelegate").warning("Accessibility permission required for global key monitoring")
-            Logger.app("AppDelegate").warning("Please enable in System Settings > Privacy & Security > Accessibility")
-        } else {
-            Logger.app("AppDelegate").success("Accessibility permission granted")
-        }
-
-        // Don't request permissions at startup - let them be requested when user first tries to record
-        Logger.app("AppDelegate").info("Permissions will be requested when you first use recording feature")
-
-        Logger.app("AppDelegate").info("Setting up event monitors for right Option key (keyCode: \(rightOptionKeyCode))")
-        
-        // Use local event monitor to catch events when app has focus
-        NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { event in
-            Logger.input("EventMonitor").debug("Flags changed: keyCode=\(event.keyCode), modifierFlags=\(event.modifierFlags.rawValue)")
-            if event.keyCode == self.rightOptionKeyCode {
-                let isPressed = event.modifierFlags.contains(.option)
-                Logger.input("EventMonitor").success("Right Option key \(isPressed ? "pressed" : "released")")
-                
-                if isPressed {
-                    if !self.isRightOptionDown {
-                        self.isRightOptionDown = true
-                        Logger.input("EventMonitor").info("Posting rightOptionKeyDown notification (short press)")
-                        NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
-                        self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
-                            Logger.input("EventMonitor").info("Posting rightOptionKeyDown notification (long press)")
-                            NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
-                        }
-                    }
-                } else {
-                    if self.isRightOptionDown {
-                        self.isRightOptionDown = false
-                        self.keyDownTimer?.invalidate()
-                        Logger.input("EventMonitor").info("Posting rightOptionKeyUp notification")
-                        NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
-                    }
-                }
-            }
-            return event
-        }
-        
-        // Also use global monitor for when app doesn't have focus
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { event in
-            Logger.input("GlobalEventMonitor").debug("Global flags changed: keyCode=\(event.keyCode)")
-            if event.keyCode == self.rightOptionKeyCode {
-                let isPressed = event.modifierFlags.contains(.option)
-                Logger.input("GlobalEventMonitor").success("Right Option key \(isPressed ? "pressed" : "released") (global)")
-                
-                if isPressed {
-                    if !self.isRightOptionDown {
-                        self.isRightOptionDown = true
-                        Logger.input("GlobalEventMonitor").info("Posting rightOptionKeyDown notification (short press)")
-                        NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
-                        self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
-                            Logger.input("GlobalEventMonitor").info("Posting rightOptionKeyDown notification (long press)")
-                            NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
-                        }
-                    }
-                } else {
-                    if self.isRightOptionDown {
-                        self.isRightOptionDown = false
-                        self.keyDownTimer?.invalidate()
-                        Logger.input("GlobalEventMonitor").info("Posting rightOptionKeyUp notification")
-                        NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
-                    }
-                }
-            }
-        }
-        
-        if eventMonitor == nil {
-            Logger.app("AppDelegate").error("Failed to create global event monitor")
-        } else {
-            Logger.app("AppDelegate").success("Event monitors created successfully")
-        }
+  func applicationDidFinishLaunching(_ aNotification: Notification) {
+    // Window appearance
+    NSApplication.shared.setActivationPolicy(.accessory)
+    NSApplication.shared.activate(ignoringOtherApps: true)
+    if let window = NSApplication.shared.windows.first {
+      window.level = .floating
+      window.standardWindowButton(.closeButton)?.isHidden = true
+      window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+      window.standardWindowButton(.zoomButton)?.isHidden = true
     }
+
+    if AXIsProcessTrusted() {
+      Logger.app("AppDelegate").success("Accessibility permission granted")
+    } else {
+      Logger.app("AppDelegate").warning("Accessibility permission required for global key monitoring.")
+      Logger.app("AppDelegate").warning("Enable it in System Settings > Privacy & Security > Accessibility.")
+    }
+    // AV + Speech permissions are deferred until the user first records.
+
+    // macOS delivers flagsChanged to local and global monitors on
+    // complementary paths: local when the app is frontmost, global
+    // otherwise. Route both to the same handler so the notification
+    // semantics match regardless of focus state.
+    NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+      self?.handleFlagsChanged(event)
+      return event
+    }
+    globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+      self?.handleFlagsChanged(event)
+    }
+    if globalMonitor == nil {
+      Logger.app("AppDelegate").error("Failed to install global flagsChanged monitor")
+    }
+  }
+
+  /// Translate a raw flagsChanged event into the app's right-Option
+  /// press/release notifications. Idempotent against key-repeat.
+  private func handleFlagsChanged(_ event: NSEvent) {
+    guard event.keyCode == Self.rightOptionKeyCode else { return }
+    let isPressed = event.modifierFlags.contains(.option)
+    Logger.input("FlagsChanged").debug("rightOption \(isPressed ? "down" : "up")")
+
+    if isPressed {
+      guard !isRightOptionDown else { return }
+      isRightOptionDown = true
+      NotificationCenter.default.post(
+        name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
+      keyDownTimer = Timer.scheduledTimer(
+        withTimeInterval: Self.longPressSeconds, repeats: false
+      ) { _ in
+        NotificationCenter.default.post(
+          name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
+      }
+    } else {
+      guard isRightOptionDown else { return }
+      isRightOptionDown = false
+      keyDownTimer?.invalidate()
+      keyDownTimer = nil
+      NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
+    }
+  }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     return true
