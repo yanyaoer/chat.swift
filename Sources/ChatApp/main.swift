@@ -127,23 +127,6 @@ struct VisualEffect: NSViewRepresentable {
   func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
-// MARK: - UI Style Extensions
-
-extension View {
-  func appButtonStyle() -> some View {
-    padding(.horizontal, 8)
-      .padding(.vertical, 4)
-      .background(Color.blue.opacity(0.1))
-      .cornerRadius(6)
-  }
-
-  func popoverStyle() -> some View {
-    padding()
-      .frame(width: 300, height: 400)
-      .background(VisualEffect())
-  }
-}
-
 // MARK: - Constants
 
 enum AppConstants {
