@@ -14,100 +14,74 @@ extension Notification.Name {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    private var eventMonitor: Any?
-    private var keyDownTimer: Timer?
-    private var isRightOptionDown = false
+  private var globalMonitor: Any?
+  private var keyDownTimer: Timer?
+  private var isRightOptionDown = false
 
-    private let rightOptionKeyCode: UInt16 = 61
+  private static let rightOptionKeyCode: UInt16 = 61
+  private static let longPressSeconds: TimeInterval = 1.0
 
-    func applicationDidFinishLaunching(_ aNotification: Notification) {
-        // Configure window appearance
-        NSApplication.shared.setActivationPolicy(.accessory)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        if let window = NSApplication.shared.windows.first {
-            window.level = .floating
-            window.standardWindowButton(.closeButton)?.isHidden = true
-            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
-            window.standardWindowButton(.zoomButton)?.isHidden = true
-        }
-
-        // Check accessibility permissions for global key monitoring
-        let trusted = AXIsProcessTrusted()
-        if !trusted {
-            Logger.app("AppDelegate").warning("Accessibility permission required for global key monitoring")
-            Logger.app("AppDelegate").warning("Please enable in System Settings > Privacy & Security > Accessibility")
-        } else {
-            Logger.app("AppDelegate").success("Accessibility permission granted")
-        }
-
-        // Don't request permissions at startup - let them be requested when user first tries to record
-        Logger.app("AppDelegate").info("Permissions will be requested when you first use recording feature")
-
-        Logger.app("AppDelegate").info("Setting up event monitors for right Option key (keyCode: \(rightOptionKeyCode))")
-        
-        // Use local event monitor to catch events when app has focus
-        NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { event in
-            Logger.input("EventMonitor").debug("Flags changed: keyCode=\(event.keyCode), modifierFlags=\(event.modifierFlags.rawValue)")
-            if event.keyCode == self.rightOptionKeyCode {
-                let isPressed = event.modifierFlags.contains(.option)
-                Logger.input("EventMonitor").success("Right Option key \(isPressed ? "pressed" : "released")")
-                
-                if isPressed {
-                    if !self.isRightOptionDown {
-                        self.isRightOptionDown = true
-                        Logger.input("EventMonitor").info("Posting rightOptionKeyDown notification (short press)")
-                        NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
-                        self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
-                            Logger.input("EventMonitor").info("Posting rightOptionKeyDown notification (long press)")
-                            NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
-                        }
-                    }
-                } else {
-                    if self.isRightOptionDown {
-                        self.isRightOptionDown = false
-                        self.keyDownTimer?.invalidate()
-                        Logger.input("EventMonitor").info("Posting rightOptionKeyUp notification")
-                        NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
-                    }
-                }
-            }
-            return event
-        }
-        
-        // Also use global monitor for when app doesn't have focus
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { event in
-            Logger.input("GlobalEventMonitor").debug("Global flags changed: keyCode=\(event.keyCode)")
-            if event.keyCode == self.rightOptionKeyCode {
-                let isPressed = event.modifierFlags.contains(.option)
-                Logger.input("GlobalEventMonitor").success("Right Option key \(isPressed ? "pressed" : "released") (global)")
-                
-                if isPressed {
-                    if !self.isRightOptionDown {
-                        self.isRightOptionDown = true
-                        Logger.input("GlobalEventMonitor").info("Posting rightOptionKeyDown notification (short press)")
-                        NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
-                        self.keyDownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
-                            Logger.input("GlobalEventMonitor").info("Posting rightOptionKeyDown notification (long press)")
-                            NotificationCenter.default.post(name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
-                        }
-                    }
-                } else {
-                    if self.isRightOptionDown {
-                        self.isRightOptionDown = false
-                        self.keyDownTimer?.invalidate()
-                        Logger.input("GlobalEventMonitor").info("Posting rightOptionKeyUp notification")
-                        NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
-                    }
-                }
-            }
-        }
-        
-        if eventMonitor == nil {
-            Logger.app("AppDelegate").error("Failed to create global event monitor")
-        } else {
-            Logger.app("AppDelegate").success("Event monitors created successfully")
-        }
+  func applicationDidFinishLaunching(_ aNotification: Notification) {
+    // Window appearance
+    NSApplication.shared.setActivationPolicy(.accessory)
+    NSApplication.shared.activate(ignoringOtherApps: true)
+    if let window = NSApplication.shared.windows.first {
+      window.level = .floating
+      window.standardWindowButton(.closeButton)?.isHidden = true
+      window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+      window.standardWindowButton(.zoomButton)?.isHidden = true
     }
+
+    if AXIsProcessTrusted() {
+      Logger.app("AppDelegate").success("Accessibility permission granted")
+    } else {
+      Logger.app("AppDelegate").warning("Accessibility permission required for global key monitoring.")
+      Logger.app("AppDelegate").warning("Enable it in System Settings > Privacy & Security > Accessibility.")
+    }
+    // AV + Speech permissions are deferred until the user first records.
+
+    // macOS delivers flagsChanged to local and global monitors on
+    // complementary paths: local when the app is frontmost, global
+    // otherwise. Route both to the same handler so the notification
+    // semantics match regardless of focus state.
+    NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+      self?.handleFlagsChanged(event)
+      return event
+    }
+    globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+      self?.handleFlagsChanged(event)
+    }
+    if globalMonitor == nil {
+      Logger.app("AppDelegate").error("Failed to install global flagsChanged monitor")
+    }
+  }
+
+  /// Translate a raw flagsChanged event into the app's right-Option
+  /// press/release notifications. Idempotent against key-repeat.
+  private func handleFlagsChanged(_ event: NSEvent) {
+    guard event.keyCode == Self.rightOptionKeyCode else { return }
+    let isPressed = event.modifierFlags.contains(.option)
+    Logger.input("FlagsChanged").debug("rightOption \(isPressed ? "down" : "up")")
+
+    if isPressed {
+      guard !isRightOptionDown else { return }
+      isRightOptionDown = true
+      NotificationCenter.default.post(
+        name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": false])
+      keyDownTimer = Timer.scheduledTimer(
+        withTimeInterval: Self.longPressSeconds, repeats: false
+      ) { _ in
+        NotificationCenter.default.post(
+          name: .rightOptionKeyDown, object: nil, userInfo: ["isLongPress": true])
+      }
+    } else {
+      guard isRightOptionDown else { return }
+      isRightOptionDown = false
+      keyDownTimer?.invalidate()
+      keyDownTimer = nil
+      NotificationCenter.default.post(name: .rightOptionKeyUp, object: nil)
+    }
+  }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     return true
@@ -125,23 +99,6 @@ struct VisualEffect: NSViewRepresentable {
     return view
   }
   func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
-}
-
-// MARK: - UI Style Extensions
-
-extension View {
-  func appButtonStyle() -> some View {
-    padding(.horizontal, 8)
-      .padding(.vertical, 4)
-      .background(Color.blue.opacity(0.1))
-      .cornerRadius(6)
-  }
-
-  func popoverStyle() -> some View {
-    padding()
-      .frame(width: 300, height: 400)
-      .background(VisualEffect())
-  }
 }
 
 // MARK: - Constants
@@ -457,6 +414,9 @@ class ChatHistory {
   static let shared = ChatHistory()
   private let historyPath: URL
   private let promptsPath: URL
+  /// Rotate the active history.md file once it grows past this size.
+  /// Keeps single-file reads tractable for users who tail the log.
+  private static let historyMaxBytes: Int64 = 2 * 1024 * 1024  // 2 MiB
   @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
 
   private init() {
@@ -541,7 +501,48 @@ class ChatHistory {
     }
   }
 
+  /// If history.md is past the size cap, rename it to `history-<ts>.md`
+  /// so the next write starts a fresh file. Best-effort; any failure is
+  /// logged and we keep appending to the existing file.
+  private func rotateIfNeeded() {
+    let fm = FileManager.default
+    guard let attrs = try? fm.attributesOfItem(atPath: historyPath.path),
+          let size = attrs[.size] as? NSNumber,
+          size.int64Value >= Self.historyMaxBytes else { return }
+
+    let fmt = DateFormatter()
+    fmt.dateFormat = "yyyyMMdd-HHmmss"
+    let stamp = fmt.string(from: Date())
+    let rotated = historyPath.deletingLastPathComponent()
+      .appendingPathComponent("history-\(stamp).md")
+    do {
+      try fm.moveItem(at: historyPath, to: rotated)
+      Logger.app("ChatHistory").info("rotated history.md -> \(rotated.lastPathComponent)")
+    } catch {
+      Logger.app("ChatHistory").warning("failed to rotate history: \(error.localizedDescription)")
+    }
+  }
+
+  /// Compact one-line description of an image attachment suitable for
+  /// the plain-text history log. Intentionally does NOT include the
+  /// base64 body (previously ~tens of KB per image were being truncated
+  /// into the log, making it both lossy and bloated).
+  private func describeImage(_ imageUrl: ImageURL) -> String {
+    let raw = imageUrl.url
+    // data:image/png;base64,XXXXX...
+    if raw.hasPrefix("data:"),
+       let comma = raw.firstIndex(of: ","),
+       let semi = raw.range(of: ";") {
+      let mime = String(raw[raw.index(raw.startIndex, offsetBy: 5)..<semi.lowerBound])
+      let b64Len = raw.distance(from: raw.index(after: comma), to: raw.endIndex)
+      return "[Image: \(mime), ~\(b64Len) b64 chars]"
+    }
+    return "[Image: \(raw.prefix(80))\(raw.count > 80 ? "…" : "")]"
+  }
+
   func saveMessage(_ message: ChatMessage) {
+    rotateIfNeeded()
+
     let dateFormatter = DateFormatter()
     dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
     let timestamp = dateFormatter.string(from: message.timestamp)
@@ -556,15 +557,8 @@ class ChatHistory {
       contentText = text
     case .multimodal(let items):
       contentText = items.map { item in
-        if let text = item.text {
-          return text
-        } else if let imageUrl = item.image_url {
-          let displayUrl =
-            imageUrl.url.count > 100
-            ? String(imageUrl.url.prefix(50)) + "..." + String(imageUrl.url.suffix(20))
-            : imageUrl.url
-          return "[Image: \(displayUrl)]"
-        }
+        if let text = item.text { return text }
+        if let imageUrl = item.image_url { return describeImage(imageUrl) }
         return ""
       }.joined(separator: "\n")
     }
@@ -802,7 +796,7 @@ class ChatHistory {
     }
 
     Logger.network("sendMessage").info("Setting up stream delegate...")
-    streamDelegate.output = AttributedString("")
+    streamDelegate.segments = []
     streamDelegate.setModel(modelname)
     streamDelegate.currentMessageID = messageID
     streamDelegate.setQueryCompletionCallback(onQueryCompleted)
@@ -820,9 +814,46 @@ class ChatHistory {
 
 // MARK: - Network Layer
 
+/// One piece of rendered output. Chunks of the same `kind` arriving
+/// consecutively are coalesced into the last segment's `text` via plain
+/// String +=, amortised O(1), instead of rebuilding an ever-growing
+/// AttributedString on every streamed delta.
+enum OutputSegment: Equatable {
+  case text(String)       // assistant reply (default colour)
+  case reasoning(String)  // reasoning_content and tool_use markers (secondary)
+  case info(String)       // MCP tool-call header block (blue)
+  case result(String)     // MCP tool-call result block (green)
+  case error(String)      // network / HTTP error (red)
+
+  var kind: Int {
+    switch self {
+    case .text:      return 0
+    case .reasoning: return 1
+    case .info:      return 2
+    case .result:    return 3
+    case .error:     return 4
+    }
+  }
+  var text: String {
+    switch self {
+    case .text(let s), .reasoning(let s), .info(let s),
+         .result(let s), .error(let s): return s
+    }
+  }
+  var color: Color {
+    switch self {
+    case .text:      return .primary
+    case .reasoning: return .secondary
+    case .info:      return .blue
+    case .result:    return .green
+    case .error:     return .red
+    }
+  }
+}
+
 final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, @unchecked Sendable
 {
-  @Published var output: AttributedString = ""
+  @Published var segments: [OutputSegment] = []
   private var currentResponse: String = ""
   private var currentModel: String = ""
   private var isCurrentlyReasoning: Bool = false
@@ -840,7 +871,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
     Logger.stream("cancelCurrentQuery").info("Cancelling query...")
     currentTask?.cancel()
     DispatchQueue.main.async {
-      self.output = AttributedString("")
+      self.segments = []
       self.currentResponse = ""
       self.isCurrentlyReasoning = false
       self.pendingMCPCall = ""
@@ -955,15 +986,32 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   }
   
   @MainActor private func updateUI(_ header: String, _ content: String) {
-    var headerAttr = AttributedString("\n\(header)\n")
-    headerAttr.foregroundColor = header.contains("工具结果") ? .green : .blue
-    
-    var contentAttr = AttributedString(content + "\n")
-    contentAttr.foregroundColor = .primary
-    
-    output += headerAttr + contentAttr
-    if header.contains("工具结果") {
+    let isResult = header.contains("工具结果")
+    // Header + body go into one segment so the colour is crisp and no
+    // extra mid-paragraph spacing appears between them.
+    let blob = "\n\(header)\n\(content)\n"
+    append(isResult ? .result(blob) : .info(blob))
+    if isResult {
       currentResponse += "\n\(header):\n\(content)\n"
+    }
+  }
+
+  /// Append a chunk, coalescing with the trailing segment if it's the same kind.
+  /// Same-kind coalesce is plain String +=, amortised O(1).
+  @MainActor fileprivate func append(_ segment: OutputSegment) {
+    if let last = segments.last, last.kind == segment.kind {
+      let merged: OutputSegment
+      switch (last, segment) {
+      case (.text(let a),      .text(let b)):      merged = .text(a + b)
+      case (.reasoning(let a), .reasoning(let b)): merged = .reasoning(a + b)
+      case (.info(let a),      .info(let b)):      merged = .info(a + b)
+      case (.result(let a),    .result(let b)):    merged = .result(a + b)
+      case (.error(let a),     .error(let b)):     merged = .error(a + b)
+      default: segments.append(segment); return
+      }
+      segments[segments.count - 1] = merged
+    } else {
+      segments.append(segment)
     }
   }
   
@@ -998,9 +1046,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         response.statusCode >= 400
       {
         DispatchQueue.main.async {
-          var errorChunk = AttributedString("\nError: HTTP \(response.statusCode)\n\(text)")
-          errorChunk.foregroundColor = .red
-          self.output += errorChunk
+          self.append(.error("\nError: HTTP \(response.statusCode)\n\(text)"))
           self.isCurrentlyReasoning = false
           self.onQueryCompleted?()
         }
@@ -1016,7 +1062,8 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
   private func processLines(_ lines: [String]) {
     var isDone = false
     var accumulatedContent = ""  // Accumulate content locally to avoid async issues
-    var accumulatedOutput: [AttributedString] = []  // Accumulate UI updates
+    // Segments ready to flush to the UI in a single MainActor hop.
+    var accumulatedOutput: [OutputSegment] = []
     
     // First pass: process all content chunks
     for line in lines {
@@ -1051,34 +1098,22 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
       
       accumulatedContent += chunkToAppend
       
-      // Prepare attributed string for UI
-      var attributedChunk: AttributedString
-      let containsToolUse = chunkToAppend.contains("<tool_use>") || chunkToAppend.contains("</tool_use>") || 
+      // Tool-use markers render with the same 'secondary' colour as
+      // reasoning content, so both flow into .reasoning segments.
+      let containsToolUse = chunkToAppend.contains("<tool_use>") || chunkToAppend.contains("</tool_use>") ||
                              chunkToAppend.contains("<mcp_call>") || chunkToAppend.contains("</mcp_call>")
-      
-      if containsToolUse {
-        // Apply "think" style (secondary color) to tool use content
-        attributedChunk = AttributedString(chunkToAppend)
-        attributedChunk.foregroundColor = .secondary
-      } else {
-        // Normal content
-        attributedChunk = AttributedString(chunkToAppend)
-        if chunk.isReasoning {
-          attributedChunk.foregroundColor = .secondary
-        }
-      }
-      
-      accumulatedOutput.append(attributedChunk)
+      let isSecondary = chunk.isReasoning || containsToolUse
+      accumulatedOutput.append(isSecondary ? .reasoning(chunkToAppend) : .text(chunkToAppend))
     }
-    
+
     // Update UI synchronously on main thread with all accumulated content
     DispatchQueue.main.sync {
       guard self.currentMessageID != nil else { return }
-      
-      for attrStr in accumulatedOutput {
-        self.output += attrStr
+
+      for seg in accumulatedOutput {
+        self.append(seg)
       }
-      
+
       self.currentResponse += accumulatedContent
       self.pendingMCPCall += accumulatedContent
     }
@@ -1137,9 +1172,7 @@ final class StreamDelegate: NSObject, URLSessionDataDelegate, ObservableObject, 
         if (error as NSError).code == NSURLErrorCancelled {
           Logger.stream("didCompleteWithError").info("URLSession task explicitly cancelled")
         } else {
-          var errorChunk = AttributedString("\nNetwork Error: \(error.localizedDescription)")
-          errorChunk.foregroundColor = .red
-          self.output += errorChunk
+          self.append(.error("\nNetwork Error: \(error.localizedDescription)"))
         }
         self.isCurrentlyReasoning = false
         self.pendingMCPCall = ""
@@ -1371,7 +1404,7 @@ struct App: SwiftUI.App {
         LLMInputView
         Divider()
 
-        if !viewModel.streamDelegate.output.characters.isEmpty {
+        if !viewModel.streamDelegate.segments.isEmpty {
           LLMOutputView
         } else {
           Spacer(minLength: 20)
@@ -1593,8 +1626,17 @@ extension App {
 
 extension App {
   private var LLMOutputView: some View {
+    // Concatenate segments as chained Text views so they flow in a
+    // single wrapped paragraph. This avoids the O(n²) cost of rebuilding
+    // one big AttributedString on every streaming chunk (subscriber-held
+    // copies force a CoW of the whole buffer on each mutation), while
+    // keeping the visual appearance identical to the old single-Text
+    // output.
     ScrollView {
-      Text(viewModel.streamDelegate.output)
+      viewModel.streamDelegate.segments
+        .reduce(Text("")) { acc, seg in
+          acc + Text(seg.text).foregroundColor(seg.color)
+        }
         .lineLimit(nil)
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -2031,7 +2073,27 @@ struct OpenAIConfig: Codable, ConfigLoadable {
       .appendingPathComponent(AppConstants.mainConfigFileName)
   }
 
+  // Config is loaded from disk once and cached for the lifetime of the
+  // process. Every sendMessage used to re-read and re-decode config.json;
+  // the cache also provides a single consistent view during a session.
+  // Accessed only from the main thread (SwiftUI View.init / @MainActor
+  // call sites), so a plain static is sufficient under nonisolated(unsafe).
+  nonisolated(unsafe) private static var cached: OpenAIConfig?
+
   static func load() -> OpenAIConfig {
+    if let cached { return cached }
+    let config = loadFromDisk()
+    cached = config
+    return config
+  }
+
+  /// Force a re-read from disk, e.g. for a future "reload config" menu.
+  static func reload() -> OpenAIConfig {
+    cached = nil
+    return load()
+  }
+
+  private static func loadFromDisk() -> OpenAIConfig {
     do {
       let config = try loadConfig(OpenAIConfig.self)
 
