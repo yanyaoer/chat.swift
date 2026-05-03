@@ -414,6 +414,9 @@ class ChatHistory {
   static let shared = ChatHistory()
   private let historyPath: URL
   private let promptsPath: URL
+  /// Rotate the active history.md file once it grows past this size.
+  /// Keeps single-file reads tractable for users who tail the log.
+  private static let historyMaxBytes: Int64 = 2 * 1024 * 1024  // 2 MiB
   @AppStorage("selectedPrompt") private var selectedPrompt: String = ""
 
   private init() {
@@ -498,7 +501,48 @@ class ChatHistory {
     }
   }
 
+  /// If history.md is past the size cap, rename it to `history-<ts>.md`
+  /// so the next write starts a fresh file. Best-effort; any failure is
+  /// logged and we keep appending to the existing file.
+  private func rotateIfNeeded() {
+    let fm = FileManager.default
+    guard let attrs = try? fm.attributesOfItem(atPath: historyPath.path),
+          let size = attrs[.size] as? NSNumber,
+          size.int64Value >= Self.historyMaxBytes else { return }
+
+    let fmt = DateFormatter()
+    fmt.dateFormat = "yyyyMMdd-HHmmss"
+    let stamp = fmt.string(from: Date())
+    let rotated = historyPath.deletingLastPathComponent()
+      .appendingPathComponent("history-\(stamp).md")
+    do {
+      try fm.moveItem(at: historyPath, to: rotated)
+      Logger.app("ChatHistory").info("rotated history.md -> \(rotated.lastPathComponent)")
+    } catch {
+      Logger.app("ChatHistory").warning("failed to rotate history: \(error.localizedDescription)")
+    }
+  }
+
+  /// Compact one-line description of an image attachment suitable for
+  /// the plain-text history log. Intentionally does NOT include the
+  /// base64 body (previously ~tens of KB per image were being truncated
+  /// into the log, making it both lossy and bloated).
+  private func describeImage(_ imageUrl: ImageURL) -> String {
+    let raw = imageUrl.url
+    // data:image/png;base64,XXXXX...
+    if raw.hasPrefix("data:"),
+       let comma = raw.firstIndex(of: ","),
+       let semi = raw.range(of: ";") {
+      let mime = String(raw[raw.index(raw.startIndex, offsetBy: 5)..<semi.lowerBound])
+      let b64Len = raw.distance(from: raw.index(after: comma), to: raw.endIndex)
+      return "[Image: \(mime), ~\(b64Len) b64 chars]"
+    }
+    return "[Image: \(raw.prefix(80))\(raw.count > 80 ? "…" : "")]"
+  }
+
   func saveMessage(_ message: ChatMessage) {
+    rotateIfNeeded()
+
     let dateFormatter = DateFormatter()
     dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
     let timestamp = dateFormatter.string(from: message.timestamp)
@@ -513,15 +557,8 @@ class ChatHistory {
       contentText = text
     case .multimodal(let items):
       contentText = items.map { item in
-        if let text = item.text {
-          return text
-        } else if let imageUrl = item.image_url {
-          let displayUrl =
-            imageUrl.url.count > 100
-            ? String(imageUrl.url.prefix(50)) + "..." + String(imageUrl.url.suffix(20))
-            : imageUrl.url
-          return "[Image: \(displayUrl)]"
-        }
+        if let text = item.text { return text }
+        if let imageUrl = item.image_url { return describeImage(imageUrl) }
         return ""
       }.joined(separator: "\n")
     }
