@@ -1988,7 +1988,27 @@ struct OpenAIConfig: Codable, ConfigLoadable {
       .appendingPathComponent(AppConstants.mainConfigFileName)
   }
 
+  // Config is loaded from disk once and cached for the lifetime of the
+  // process. Every sendMessage used to re-read and re-decode config.json;
+  // the cache also provides a single consistent view during a session.
+  // Accessed only from the main thread (SwiftUI View.init / @MainActor
+  // call sites), so a plain static is sufficient under nonisolated(unsafe).
+  nonisolated(unsafe) private static var cached: OpenAIConfig?
+
   static func load() -> OpenAIConfig {
+    if let cached { return cached }
+    let config = loadFromDisk()
+    cached = config
+    return config
+  }
+
+  /// Force a re-read from disk, e.g. for a future "reload config" menu.
+  static func reload() -> OpenAIConfig {
+    cached = nil
+    return load()
+  }
+
+  private static func loadFromDisk() -> OpenAIConfig {
     do {
       let config = try loadConfig(OpenAIConfig.self)
 
